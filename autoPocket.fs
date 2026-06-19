@@ -1,35 +1,31 @@
+FeatureScript 2985;
+import(path : "onshape/std/geometry.fs", version : "2985.0");
+
 // AutoPocket  -  Automatic rib-pocketing for FTC / FRC plates
 //
 // Click a planar plate face and this feature finds every through-hole,
 // (optionally) anchors to the plate edges, builds a Delaunay triangulation
-// of those points, and draws the triangle edges as rib centerlines in a
-// sketch -- the classic triangulated lightening pattern.
-//
-// NOTE ON THE VERSION LINE BELOW:
-//   When you create a new Feature Studio, Onshape auto-fills the first two
-//   lines (FeatureScript <n>; and the import with version "<n>.0") with the
-//   version current to your document. If you paste this whole file, just
-//   replace 2588 with whatever number Onshape generated for you, or paste
-//   everything from "// ===== Parameter bounds" downward below the import
-//   lines Onshape created.
-
-FeatureScript 2588;
-import(path : "onshape/std/geometry.fs", version : "2588.0");
+// of those points, then THINS it into a clean lightening pattern:
+//   - holes that sit closer together than "Merge holes closer than" are
+//     collapsed to a single strut anchor (kills tiny clustered pockets), and
+//   - each anchor keeps only its N shortest struts ("Max struts per hole"),
+//     instead of connecting to every neighbour.
+// The result is a coarse, organic web of large pockets with ~3 struts/hole.
 
 // ===== Parameter bounds ====================================================
 
 export const RIB_WIDTH_BOUNDS = {
-            (meter)      : [1e-4, 0.003, 0.1],
-            (centimeter) : 0.3,
-            (millimeter) : 3.0,
-            (inch)       : 0.125
+            (meter)      : [1e-4, 0.004, 0.1],
+            (centimeter) : 0.4,
+            (millimeter) : 4.0,
+            (inch)       : 0.15
         } as LengthBoundSpec;
 
 export const BOSS_BOUNDS = {
-            (meter)      : [0.0, 0.003, 0.1],
-            (centimeter) : 0.3,
-            (millimeter) : 3.0,
-            (inch)       : 0.125
+            (meter)      : [0.0, 0.004, 0.1],
+            (centimeter) : 0.4,
+            (millimeter) : 4.0,
+            (inch)       : 0.15
         } as LengthBoundSpec;
 
 export const NONNEG_LENGTH_BOUNDS = {
@@ -39,16 +35,25 @@ export const NONNEG_LENGTH_BOUNDS = {
             (inch)       : 0.0
         } as LengthBoundSpec;
 
-// Named EDGE_SAMPLE_BOUNDS (not SAMPLE_BOUNDS) to avoid a clash with a
-// constant of that name already exported by the Onshape standard library.
+export const SPACING_BOUNDS = {
+            (meter)      : [0.0, 0.025, 5.0],
+            (centimeter) : 2.5,
+            (millimeter) : 25.0,
+            (inch)       : 1.0
+        } as LengthBoundSpec;
+
 export const EDGE_SAMPLE_BOUNDS = {
             (unitless) : [0, 1, 10]
         } as IntegerBoundSpec;
 
-// ===== Feature definition ==================================================
+export const STRUT_BOUNDS = {
+            (unitless) : [2, 3, 8]
+        } as IntegerBoundSpec;
+
+// ===== Feature =============================================================
 
 annotation { "Feature Type Name" : "Auto Pocket",
-             "Feature Type Description" : "Draws triangulated rib lines between hole centers on a plate face." }
+             "Feature Type Description" : "Draws a thinned triangulated rib network between hole centers on a plate face." }
 export const autoPocket = defineFeature(function(context is Context, id is Id, definition is map)
     precondition
     {
@@ -59,6 +64,12 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
+
+        annotation { "Name" : "Merge holes closer than" }
+        isLength(definition.minHoleSpacing, SPACING_BOUNDS);
+
+        annotation { "Name" : "Max struts per hole" }
+        isInteger(definition.maxStrutsPerHole, STRUT_BOUNDS);
 
         annotation { "Name" : "Anchor ribs to plate edges", "Default" : true }
         definition.includeBoundary is boolean;
@@ -94,10 +105,10 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         const plane = evPlane(context, { "face" : definition.face });
         const minRadiusMm = (definition.minHoleDiameter / 2) / millimeter;
 
-        // ----- 1. Collect hole centers and boundary anchor points (numbers, mm)
-        var holePts   = [];   // [x, y] in mm
-        var holeRadii = [];   // mm, index-aligned with holePts
-        var boundaryPts = []; // [x, y] in mm
+        // ----- 1. Collect hole centers and boundary anchor points (mm) --------
+        var holePts = [];      // [x, y]
+        var holeRadii = [];    // mm, index-aligned with holePts
+        var boundaryPts = [];  // [x, y]
 
         for (var edge in evaluateQuery(context, qLoopEdges(definition.face)))
         {
@@ -122,10 +133,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
             }
 
-            // Anything that is not a hole is treated as plate boundary; sample it.
             if (!classifiedAsHole && definition.includeBoundary)
             {
-                const count = definition.boundarySamples + 2; // endpoints + interior samples
+                const count = definition.boundarySamples + 2;
                 for (var i = 0; i < count; i += 1)
                 {
                     const t = i / (count - 1);
@@ -139,17 +149,42 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
-        boundaryPts = dedupePoints(boundaryPts, 0.05); // collapse shared vertices (0.05 mm)
+        // ----- 2. Thin the strut anchors --------------------------------------
+        // Holes closer than "Merge holes closer than" collapse to one anchor, so
+        // dense grids of fastener holes don't each spawn struts (-> big pockets).
+        const spacingMm = definition.minHoleSpacing / millimeter;
+        var nodePts = [];
+        var nodeRadii = [];
+        for (var i = 0; i < size(holePts); i += 1)
+        {
+            var keep = true;
+            if (spacingMm > 0.001)
+            {
+                for (var j = 0; j < size(nodePts); j += 1)
+                {
+                    if (pointDistance(holePts[i], nodePts[j]) < spacingMm) { keep = false; break; }
+                }
+            }
+            if (keep)
+            {
+                nodePts = append(nodePts, holePts[i]);
+                nodeRadii = append(nodeRadii, holeRadii[i]);
+            }
+        }
+        holePts = nodePts;
+        holeRadii = nodeRadii;
+
+        boundaryPts = dedupePoints(boundaryPts, 0.05);
 
         const nHoles = size(holePts);
         if (nHoles == 0)
-            throw regenError("No through-holes found on this face. (Holes are detected as full circular edges lying in the face.)", ["face"]);
+            throw regenError("No through-holes found on this face.", ["face"]);
 
         const pts = concatenateArrays([holePts, boundaryPts]);
         if (size(pts) < 2)
-            throw regenError("Need at least 2 anchor points (holes and/or plate edges) to draw a rib.", ["face"]);
+            throw regenError("Need at least 2 anchor points to draw a rib.", ["face"]);
 
-        // ----- 2. Triangulate -------------------------------------------------
+        // ----- 3. Triangulate -------------------------------------------------
         var edgeSet = {};
         if (size(pts) == 2)
         {
@@ -170,26 +205,46 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
-        // ----- 3. Filter edges: keep ribs that touch a hole and aren't too long
+        // ----- 4. Thin edges: each hole keeps only its N shortest struts ------
         const maxRibMm = definition.maxRibLength / millimeter;
-        var keptEdges = [];
-        for (var key in keys(edgeSet))
+        const maxStruts = definition.maxStrutsPerHole;
+        const totalPts = size(pts);
+        var keepSet = {};
+        for (var n = 0; n < totalPts; n += 1)
         {
-            const e = edgeSet[key];
-            const a = e[0];
-            const b = e[1];
-            // Skip edges that run between two boundary points (they sit on the plate edge).
-            if (a >= nHoles && b >= nHoles)
-                continue;
-            const L = pointDistance(pts[a], pts[b]);
-            if (L < 0.001)
-                continue;
-            if (maxRibMm > 0.001 && L > maxRibMm)
-                continue;
-            keptEdges = append(keptEdges, [a, b]);
+            // Gather this node's candidate struts (must touch a hole, not too long).
+            var inc = [];
+            for (var key in keys(edgeSet))
+            {
+                const e = edgeSet[key];
+                if (e[0] != n && e[1] != n)
+                    continue;
+                const other = (e[0] == n) ? e[1] : e[0];
+                if (n >= nHoles && other >= nHoles)   // skip boundary-to-boundary
+                    continue;
+                const L = pointDistance(pts[n], pts[other]);
+                if (L < 0.001)
+                    continue;
+                if (maxRibMm > 0.001 && L > maxRibMm)
+                    continue;
+                inc = append(inc, [other, L]);
+            }
+            inc = sortPairsByLength(inc);
+            // Limit struts only for holes; boundary anchors keep all their links.
+            const limit = (n < nHoles) ? min(maxStruts, size(inc)) : size(inc);
+            for (var i = 0; i < limit; i += 1)
+            {
+                const other = inc[i][0];
+                const aa = min(n, other);
+                const bb = max(n, other);
+                keepSet[aa ~ "_" ~ bb] = [aa, bb];
+            }
         }
+        var keptEdges = [];
+        for (var key in keys(keepSet))
+            keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 4. Draw rib centerlines ----------------------------------------
+        // ----- 5. Draw rib centerlines ----------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
@@ -215,14 +270,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         skSolve(ribSketch);
 
-        // ----- 5. Optional: pocket profiles (bosses + offset rib edges) -------
-        // These overlapping curves divide the face into closed regions you can
-        // select with Extrude (Remove) -- the open triangle interiors are the
-        // pockets, the ribs/bosses are the material you keep.
+        // ----- 6. Optional pocket profiles (bosses + offset rib edges) --------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
-            const halfW   = (definition.ribWidth / millimeter) / 2;
+            const halfW = (definition.ribWidth / millimeter) / 2;
             const bossExtra = definition.bossOffset / millimeter;
 
             for (var i = 0; i < nHoles; i += 1)
@@ -243,7 +295,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 const len = sqrt(dx * dx + dy * dy);
                 if (len < 0.001)
                     continue;
-                const nx = -dy / len; // unit normal to the rib
+                const nx = -dy / len;
                 const ny =  dx / len;
                 for (var s in [halfW, -halfW])
                 {
@@ -257,16 +309,37 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             skSolve(pocketSketch);
         }
 
-        reportFeatureInfo(context, id, nHoles ~ " holes detected, " ~ size(keptEdges) ~ " ribs drawn.");
+        reportFeatureInfo(context, id, nHoles ~ " anchors, " ~ size(keptEdges) ~ " struts drawn.");
     });
 
-// ===== Geometry helpers ====================================================
+// ===== Helper functions ====================================================
 
 function pointDistance(a is array, b is array) returns number
 {
     const dx = a[0] - b[0];
     const dy = a[1] - b[1];
     return sqrt(dx * dx + dy * dy);
+}
+
+function sortPairsByLength(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+        {
+            if (a[j][1] < a[mi][1])
+                mi = j;
+        }
+        if (mi != i)
+        {
+            const tmp = a[i];
+            a[i] = a[mi];
+            a[mi] = tmp;
+        }
+    }
+    return a;
 }
 
 function dedupePoints(pts is array, tol is number) returns array
@@ -277,11 +350,7 @@ function dedupePoints(pts is array, tol is number) returns array
         var duplicate = false;
         for (var q in out)
         {
-            if (pointDistance(p, q) < tol)
-            {
-                duplicate = true;
-                break;
-            }
+            if (pointDistance(p, q) < tol) { duplicate = true; break; }
         }
         if (!duplicate)
             out = append(out, p);
@@ -289,28 +358,20 @@ function dedupePoints(pts is array, tol is number) returns array
     return out;
 }
 
-// ===== Delaunay triangulation (Bowyer-Watson) ==============================
-// Input:  array of [x, y] numbers.
-// Output: array of triangles, each an array of 3 indices into the input.
-
+// Delaunay triangulation (Bowyer-Watson). In: array of [x,y]. Out: array of [i,j,k].
 function inCircumcircle(p is array, a is array, b is array, c is array) returns boolean
 {
-    const ax = a[0] - p[0];
-    const ay = a[1] - p[1];
-    const bx = b[0] - p[0];
-    const by = b[1] - p[1];
-    const cx = c[0] - p[0];
-    const cy = c[1] - p[1];
+    const ax = a[0] - p[0]; const ay = a[1] - p[1];
+    const bx = b[0] - p[0]; const by = b[1] - p[1];
+    const cx = c[0] - p[0]; const cy = c[1] - p[1];
 
     var det = (ax * ax + ay * ay) * (bx * cy - cx * by)
             - (bx * bx + by * by) * (ax * cy - cx * ay)
             + (cx * cx + cy * cy) * (ax * by - bx * ay);
 
-    // Sign depends on the winding of a, b, c; normalize for CCW.
     const orient = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
     if (orient < 0)
         det = -det;
-
     return det > 0;
 }
 
@@ -323,17 +384,12 @@ function bowyerWatson(inputPts is array) returns array
 {
     const n = size(inputPts);
 
-    // Bounding box -> super-triangle that comfortably contains every point.
-    var minX = inputPts[0][0];
-    var maxX = inputPts[0][0];
-    var minY = inputPts[0][1];
-    var maxY = inputPts[0][1];
+    var minX = inputPts[0][0]; var maxX = inputPts[0][0];
+    var minY = inputPts[0][1]; var maxY = inputPts[0][1];
     for (var p in inputPts)
     {
-        minX = min(minX, p[0]);
-        maxX = max(maxX, p[0]);
-        minY = min(minY, p[1]);
-        maxY = max(maxY, p[1]);
+        minX = min(minX, p[0]); maxX = max(maxX, p[0]);
+        minY = min(minY, p[1]); maxY = max(maxY, p[1]);
     }
     const dmax = max(maxX - minX, maxY - minY) * 10 + 1;
     const midX = (minX + maxX) / 2;
@@ -345,13 +401,12 @@ function bowyerWatson(inputPts is array) returns array
                 [midX + 2 * dmax, midY - dmax]
             ]]);
 
-    var triangles = [[n, n + 1, n + 2]]; // start with the super-triangle
+    var triangles = [[n, n + 1, n + 2]];
 
     for (var i = 0; i < n; i += 1)
     {
         const p = verts[i];
 
-        // Triangles whose circumcircle contains p are invalid.
         var badTriangles = [];
         for (var t in triangles)
         {
@@ -359,7 +414,6 @@ function bowyerWatson(inputPts is array) returns array
                 badTriangles = append(badTriangles, t);
         }
 
-        // Boundary of the cavity = edges belonging to exactly one bad triangle.
         var polygon = [];
         for (var t in badTriangles)
         {
@@ -374,44 +428,32 @@ function bowyerWatson(inputPts is array) returns array
                     const t2Edges = [[t2[0], t2[1]], [t2[1], t2[2]], [t2[2], t2[0]]];
                     for (var e2 in t2Edges)
                     {
-                        if (sameUndirectedEdge(e, e2))
-                        {
-                            shared = true;
-                            break;
-                        }
+                        if (sameUndirectedEdge(e, e2)) { shared = true; break; }
                     }
-                    if (shared)
-                        break;
+                    if (shared) break;
                 }
                 if (!shared)
                     polygon = append(polygon, e);
             }
         }
 
-        // Drop bad triangles.
         var remaining = [];
         for (var t in triangles)
         {
             var isBad = false;
             for (var bt in badTriangles)
             {
-                if (bt == t)
-                {
-                    isBad = true;
-                    break;
-                }
+                if (bt == t) { isBad = true; break; }
             }
             if (!isBad)
                 remaining = append(remaining, t);
         }
         triangles = remaining;
 
-        // Re-triangulate the cavity against the new point.
         for (var e in polygon)
             triangles = append(triangles, [e[0], e[1], i]);
     }
 
-    // Discard any triangle still touching the super-triangle vertices.
     var result = [];
     for (var t in triangles)
     {
