@@ -58,7 +58,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
 
-        annotation { "Name" : "Anchor ribs to plate edges" }
+        annotation { "Name" : "Anchor ribs to plate edges", "Default" : true }
         definition.includeBoundary is boolean;
 
         if (definition.includeBoundary)
