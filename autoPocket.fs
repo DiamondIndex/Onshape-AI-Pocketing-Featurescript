@@ -149,17 +149,17 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             throw regenError("Could not form a closed plate outline.", ["face"]);
 
         // ----- 2. Merge holes that are too close (avoids micro-pockets) -------
-        const holeMerge = 0.5 * s;
+        // Keep EVERY hole as a strut vertex (only drop exact duplicates).
         var mHolePts = [];
         var mHoleRadii = [];
         for (var i = 0; i < size(holePts); i += 1)
         {
-            var keep = true;
+            var dup = false;
             for (var j = 0; j < size(mHolePts); j += 1)
             {
-                if (pointDistance(holePts[i], mHolePts[j]) < holeMerge) { keep = false; break; }
+                if (pointDistance(holePts[i], mHolePts[j]) < 1.0) { dup = true; break; }
             }
-            if (keep) { mHolePts = append(mHolePts, holePts[i]); mHoleRadii = append(mHoleRadii, holeRadii[i]); }
+            if (!dup) { mHolePts = append(mHolePts, holePts[i]); mHoleRadii = append(mHoleRadii, holeRadii[i]); }
         }
 
         // ----- 3. Generate the equilateral-triangle lattice inside the plate --
@@ -244,6 +244,74 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
+        // Link every hole to its nearest neighbouring hole, so a row of holes
+        // reads as one continuous LINE that struts attach to (rather than the
+        // lattice fanning a separate strut to each individual hole).
+        const lineDist = 1.0 * s;
+        for (var h = 0; h < nHoleNodes; h += 1)
+        {
+            var best = -1;
+            var bestL = lineDist;
+            for (var g = 0; g < nHoleNodes; g += 1)
+            {
+                if (g == h)
+                    continue;
+                const L = pointDistance(pts[h], pts[g]);
+                if (L < bestL) { bestL = L; best = g; }
+            }
+            if (best >= 0)
+            {
+                const a = min(h, best);
+                const b = max(h, best);
+                const mid = [(pts[a][0] + pts[b][0]) / 2, (pts[a][1] + pts[b][1]) / 2];
+                if (pointInPolygon(poly, mid))
+                    keepSet[a ~ "_" ~ b] = [a, b];
+            }
+        }
+
+        // Requirement: every hole is a vertex with at least 3 struts. Add each
+        // under-connected hole's shortest valid links until it reaches 3.
+        var deg = [];
+        for (var i = 0; i < nHoleNodes; i += 1)
+            deg = append(deg, 0);
+        for (var key in keys(keepSet))
+        {
+            const e = keepSet[key];
+            if (e[0] < nHoleNodes) deg[e[0]] += 1;
+            if (e[1] < nHoleNodes) deg[e[1]] += 1;
+        }
+        for (var h = 0; h < nHoleNodes; h += 1)
+        {
+            if (deg[h] >= 3)
+                continue;
+            var cands = [];
+            for (var n = 0; n < size(pts); n += 1)
+            {
+                if (n == h)
+                    continue;
+                const a = min(h, n);
+                const b = max(h, n);
+                if (keepSet[a ~ "_" ~ b] != undefined)
+                    continue;
+                const mid = [(pts[h][0] + pts[n][0]) / 2, (pts[h][1] + pts[n][1]) / 2];
+                if (!pointInPolygon(poly, mid))
+                    continue;
+                cands = append(cands, [n, pointDistance(pts[h], pts[n])]);
+            }
+            cands = sortPairsByLength(cands);
+            var idx = 0;
+            while (deg[h] < 3 && idx < size(cands))
+            {
+                const n = cands[idx][0];
+                const a = min(h, n);
+                const b = max(h, n);
+                keepSet[a ~ "_" ~ b] = [a, b];
+                deg[h] += 1;
+                if (n < nHoleNodes) deg[n] += 1;
+                idx += 1;
+            }
+        }
+
         var keptEdges = [];
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
@@ -323,6 +391,27 @@ function pointDistance(a is array, b is array) returns number
     const dx = a[0] - b[0];
     const dy = a[1] - b[1];
     return sqrt(dx * dx + dy * dy);
+}
+
+function sortPairsByLength(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+        {
+            if (a[j][1] < a[mi][1])
+                mi = j;
+        }
+        if (mi != i)
+        {
+            const tmp = a[i];
+            a[i] = a[mi];
+            a[mi] = tmp;
+        }
+    }
+    return a;
 }
 
 function dedupePoints(pts is array, tol is number) returns array
