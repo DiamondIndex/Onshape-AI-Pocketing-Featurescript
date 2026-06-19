@@ -58,7 +58,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                      "MaxNumberOfPicks" : 1 }
         definition.face is Query;
 
-        annotation { "Name" : "Triangle size" }
+        annotation { "Name" : "Triangle side length" }
         isLength(definition.cellSize, CELL_BOUNDS);
 
         annotation { "Name" : "Margin from plate edge" }
@@ -313,7 +313,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             skSolve(pocketSketch);
         }
 
-        reportFeatureInfo(context, id, size(keptEdges) ~ " struts on a " ~ round(s) ~ " mm triangle lattice.");
+        reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ round(s) ~ " mm triangle side length.");
     });
 
 // ===== Helper functions ====================================================
