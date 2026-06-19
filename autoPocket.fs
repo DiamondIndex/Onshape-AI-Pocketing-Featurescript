@@ -1,18 +1,29 @@
 FeatureScript 2985;
 import(path : "onshape/std/geometry.fs", version : "2985.0");
 
-// AutoPocket  -  Automatic rib-pocketing for FTC / FRC plates
+// AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
-// Click a planar plate face and this feature finds every through-hole,
-// (optionally) anchors to the plate edges, builds a Delaunay triangulation
-// of those points, then THINS it into a clean lightening pattern:
-//   - holes that sit closer together than "Merge holes closer than" are
-//     collapsed to a single strut anchor (kills tiny clustered pockets), and
-//   - each anchor keeps only its N shortest struts ("Max struts per hole"),
-//     instead of connecting to every neighbour.
-// The result is a coarse, organic web of large pockets with ~3 struts/hole.
+// Instead of triangulating the (irregularly spaced) holes -- which gives
+// uneven pockets -- this lays a REGULAR equilateral-triangle lattice over the
+// plate, snaps lattice nodes onto the holes, clips everything to the plate
+// outline, and triangulates. The result is an even web of same-size triangles
+// with every hole supported from all sides, like a hand-pocketed plate.
 
 // ===== Parameter bounds ====================================================
+
+export const CELL_BOUNDS = {
+            (meter)      : [0.005, 0.028, 0.5],
+            (centimeter) : 2.8,
+            (millimeter) : 28.0,
+            (inch)       : 1.1
+        } as LengthBoundSpec;
+
+export const MARGIN_BOUNDS = {
+            (meter)      : [0.0, 0.006, 0.2],
+            (centimeter) : 0.6,
+            (millimeter) : 6.0,
+            (inch)       : 0.25
+        } as LengthBoundSpec;
 
 export const RIB_WIDTH_BOUNDS = {
             (meter)      : [1e-4, 0.004, 0.1],
@@ -35,25 +46,10 @@ export const NONNEG_LENGTH_BOUNDS = {
             (inch)       : 0.0
         } as LengthBoundSpec;
 
-export const SPACING_BOUNDS = {
-            (meter)      : [0.0, 0.025, 5.0],
-            (centimeter) : 2.5,
-            (millimeter) : 25.0,
-            (inch)       : 1.0
-        } as LengthBoundSpec;
-
-export const EDGE_SAMPLE_BOUNDS = {
-            (unitless) : [0, 1, 10]
-        } as IntegerBoundSpec;
-
-export const STRUT_BOUNDS = {
-            (unitless) : [2, 3, 8]
-        } as IntegerBoundSpec;
-
 // ===== Feature =============================================================
 
 annotation { "Feature Type Name" : "Auto Pocket",
-             "Feature Type Description" : "Draws a thinned triangulated rib network between hole centers on a plate face." }
+             "Feature Type Description" : "Lays a uniform triangular lightening lattice over a plate face." }
 export const autoPocket = defineFeature(function(context is Context, id is Id, definition is map)
     precondition
     {
@@ -62,26 +58,17 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                      "MaxNumberOfPicks" : 1 }
         definition.face is Query;
 
+        annotation { "Name" : "Triangle size" }
+        isLength(definition.cellSize, CELL_BOUNDS);
+
+        annotation { "Name" : "Margin from plate edge" }
+        isLength(definition.edgeMargin, MARGIN_BOUNDS);
+
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
 
-        annotation { "Name" : "Merge holes closer than" }
-        isLength(definition.minHoleSpacing, SPACING_BOUNDS);
-
-        annotation { "Name" : "Max struts per hole" }
-        isInteger(definition.maxStrutsPerHole, STRUT_BOUNDS);
-
-        annotation { "Name" : "Anchor ribs to plate edges", "Default" : true }
-        definition.includeBoundary is boolean;
-
-        if (definition.includeBoundary)
-        {
-            annotation { "Name" : "Edge anchor points per side" }
-            isInteger(definition.boundarySamples, EDGE_SAMPLE_BOUNDS);
-        }
-
-        annotation { "Name" : "Limit rib length (0 = no limit)" }
-        isLength(definition.maxRibLength, NONNEG_LENGTH_BOUNDS);
+        annotation { "Name" : "Snap lattice to holes" }
+        definition.snapToHoles is boolean;
 
         annotation { "Name" : "Draw reference circles at holes" }
         definition.drawHoleCircles is boolean;
@@ -104,147 +91,164 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         const plane = evPlane(context, { "face" : definition.face });
         const minRadiusMm = (definition.minHoleDiameter / 2) / millimeter;
+        const s = definition.cellSize / millimeter;          // triangle edge length, mm
+        const marginMm = definition.edgeMargin / millimeter;
 
-        // ----- 1. Collect hole centers and boundary anchor points (mm) --------
-        var holePts = [];      // [x, y]
-        var holeRadii = [];    // mm, index-aligned with holePts
-        var boundaryPts = [];  // [x, y]
+        // ----- 1. Read holes and the plate outline ----------------------------
+        var holePts = [];
+        var holeRadii = [];
+        var polylines = [];   // boundary edges, each as an ordered list of [x,y]
 
         for (var edge in evaluateQuery(context, qLoopEdges(definition.face)))
         {
             const cdef = try silent(evCurveDefinition(context, { "edge" : edge }));
-            var classifiedAsHole = false;
+            var isHole = false;
 
             if (cdef != undefined && cdef is Circle)
             {
-                const circumference = 2 * PI * cdef.radius;
+                const circ = 2 * PI * cdef.radius;
                 const len = try silent(evLength(context, { "entities" : edge }));
-                const isFullCircle = (len != undefined) && (abs(len - circumference) < 0.02 * circumference);
-                const center = cdef.coordSystem.origin;
-                const onPlane = abs(dot(center - plane.origin, plane.normal)) < 1e-5 * meter;
+                const fullCircle = (len != undefined) && (abs(len - circ) < 0.02 * circ);
+                const c = cdef.coordSystem.origin;
+                const onPlane = abs(dot(c - plane.origin, plane.normal)) < 1e-5 * meter;
                 const axisAligned = abs(dot(normalize(cdef.coordSystem.zAxis), plane.normal)) > 0.99;
-
-                if (isFullCircle && onPlane && axisAligned && (cdef.radius / millimeter) >= minRadiusMm)
+                if (fullCircle && onPlane && axisAligned && (cdef.radius / millimeter) >= minRadiusMm)
                 {
-                    const p2d = worldToPlane(plane, center);
+                    const p2d = worldToPlane(plane, c);
                     holePts   = append(holePts, [p2d[0] / millimeter, p2d[1] / millimeter]);
                     holeRadii = append(holeRadii, cdef.radius / millimeter);
-                    classifiedAsHole = true;
+                    isHole = true;
                 }
             }
 
-            if (!classifiedAsHole && definition.includeBoundary)
+            if (!isHole)
             {
-                const count = definition.boundarySamples + 2;
-                for (var i = 0; i < count; i += 1)
+                // Sample this boundary edge into an ordered polyline.
+                var pl = [];
+                for (var i = 0; i < 6; i += 1)
                 {
-                    const t = i / (count - 1);
+                    const t = i / 5;
                     const ln = try silent(evEdgeTangentLine(context, { "edge" : edge, "parameter" : t }));
                     if (ln != undefined)
                     {
                         const p2d = worldToPlane(plane, ln.origin);
-                        boundaryPts = append(boundaryPts, [p2d[0] / millimeter, p2d[1] / millimeter]);
+                        pl = append(pl, [p2d[0] / millimeter, p2d[1] / millimeter]);
                     }
                 }
+                if (size(pl) >= 2)
+                    polylines = append(polylines, pl);
             }
         }
 
-        // ----- 2. Thin the strut anchors --------------------------------------
-        // Holes closer than "Merge holes closer than" collapse to one anchor, so
-        // dense grids of fastener holes don't each spawn struts (-> big pockets).
-        const spacingMm = definition.minHoleSpacing / millimeter;
-        var nodePts = [];
-        var nodeRadii = [];
+        if (size(polylines) < 2)
+            throw regenError("Could not read the plate outline from this face.", ["face"]);
+
+        // Chain the boundary edges into one closed outline polygon (mm).
+        const poly = buildBoundaryPolygon(polylines);
+        if (size(poly) < 3)
+            throw regenError("Could not form a closed plate outline.", ["face"]);
+
+        // ----- 2. Merge holes that are too close (avoids micro-pockets) -------
+        const holeMerge = 0.5 * s;
+        var mHolePts = [];
+        var mHoleRadii = [];
         for (var i = 0; i < size(holePts); i += 1)
         {
             var keep = true;
-            if (spacingMm > 0.001)
+            for (var j = 0; j < size(mHolePts); j += 1)
             {
-                for (var j = 0; j < size(nodePts); j += 1)
-                {
-                    if (pointDistance(holePts[i], nodePts[j]) < spacingMm) { keep = false; break; }
-                }
+                if (pointDistance(holePts[i], mHolePts[j]) < holeMerge) { keep = false; break; }
             }
-            if (keep)
-            {
-                nodePts = append(nodePts, holePts[i]);
-                nodeRadii = append(nodeRadii, holeRadii[i]);
-            }
+            if (keep) { mHolePts = append(mHolePts, holePts[i]); mHoleRadii = append(mHoleRadii, holeRadii[i]); }
         }
-        holePts = nodePts;
-        holeRadii = nodeRadii;
 
-        boundaryPts = dedupePoints(boundaryPts, 0.05);
-
-        const nHoles = size(holePts);
-        if (nHoles == 0)
-            throw regenError("No through-holes found on this face.", ["face"]);
-
-        const pts = concatenateArrays([holePts, boundaryPts]);
-        if (size(pts) < 2)
-            throw regenError("Need at least 2 anchor points to draw a rib.", ["face"]);
-
-        // ----- 3. Triangulate -------------------------------------------------
-        var edgeSet = {};
-        if (size(pts) == 2)
+        // ----- 3. Generate the equilateral-triangle lattice inside the plate --
+        var bMinX = poly[0][0]; var bMaxX = poly[0][0];
+        var bMinY = poly[0][1]; var bMaxY = poly[0][1];
+        for (var p in poly)
         {
-            edgeSet["0_1"] = [0, 1];
+            bMinX = min(bMinX, p[0]); bMaxX = max(bMaxX, p[0]);
+            bMinY = min(bMinY, p[1]); bMaxY = max(bMaxY, p[1]);
         }
-        else
+        const rowH = s * sqrt(3) / 2;
+        const holeClear = 0.55 * s;
+
+        var latticePts = [];
+        var row = 0;
+        var y = bMinY;
+        while (y <= bMaxY)
         {
-            const triangles = bowyerWatson(pts);
-            for (var tri in triangles)
+            const xoff = (row % 2 == 0) ? 0 : (s / 2);
+            var x = bMinX + xoff;
+            while (x <= bMaxX)
             {
-                const triEdges = [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]];
-                for (var e in triEdges)
+                const q = [x, y];
+                if (pointInPolygon(poly, q) && distToPolygon(poly, q) >= marginMm)
                 {
-                    const a = min(e[0], e[1]);
-                    const b = max(e[0], e[1]);
-                    edgeSet[a ~ "_" ~ b] = [a, b];
+                    var clearOfHoles = true;
+                    if (definition.snapToHoles)
+                    {
+                        for (var h in mHolePts)
+                        {
+                            if (pointDistance(q, h) < holeClear) { clearOfHoles = false; break; }
+                        }
+                    }
+                    if (clearOfHoles)
+                        latticePts = append(latticePts, q);
                 }
+                x += s;
             }
+            y += rowH;
+            row += 1;
         }
 
-        // ----- 4. Thin edges: each hole keeps only its N shortest struts ------
-        const maxRibMm = definition.maxRibLength / millimeter;
-        const maxStruts = definition.maxStrutsPerHole;
-        const totalPts = size(pts);
+        // ----- 4. Sample the outline at ~s spacing so the rim triangulates ----
+        var rimPts = [];
+        var acc = s; // force first point
+        for (var i = 0; i < size(poly); i += 1)
+        {
+            const a = poly[i];
+            const b = poly[(i + 1) % size(poly)];
+            acc += pointDistance(a, b);
+            if (acc >= s) { rimPts = append(rimPts, a); acc = 0; }
+        }
+        rimPts = dedupePoints(rimPts, 0.25 * s);
+
+        // ----- 5. Assemble nodes: holes first, then lattice + rim -------------
+        const holeNodes = (definition.snapToHoles) ? mHolePts : [];
+        const holeNodeRadii = (definition.snapToHoles) ? mHoleRadii : [];
+        const nHoleNodes = size(holeNodes);
+        const pts = concatenateArrays([holeNodes, latticePts, rimPts]);
+        if (size(pts) < 3)
+            throw regenError("Plate too small for this triangle size; reduce 'Triangle size'.", ["cellSize"]);
+
+        // ----- 6. Triangulate and keep only interior lattice edges ------------
+        const triangles = bowyerWatson(pts);
+        const maxEdge = 1.8 * s;
         var keepSet = {};
-        for (var n = 0; n < totalPts; n += 1)
+        for (var tri in triangles)
         {
-            // Gather this node's candidate struts (must touch a hole, not too long).
-            var inc = [];
-            for (var key in keys(edgeSet))
+            const triEdges = [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]];
+            for (var e in triEdges)
             {
-                const e = edgeSet[key];
-                if (e[0] != n && e[1] != n)
+                const a = min(e[0], e[1]);
+                const b = max(e[0], e[1]);
+                const pa = pts[a];
+                const pb = pts[b];
+                const L = pointDistance(pa, pb);
+                if (L < 0.001 || L > maxEdge)
                     continue;
-                const other = (e[0] == n) ? e[1] : e[0];
-                if (n >= nHoles && other >= nHoles)   // skip boundary-to-boundary
+                const mid = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
+                if (!pointInPolygon(poly, mid))
                     continue;
-                const L = pointDistance(pts[n], pts[other]);
-                if (L < 0.001)
-                    continue;
-                if (maxRibMm > 0.001 && L > maxRibMm)
-                    continue;
-                inc = append(inc, [other, L]);
-            }
-            inc = sortPairsByLength(inc);
-            // Limit struts only for holes; boundary anchors keep all their links.
-            const limit = (n < nHoles) ? min(maxStruts, size(inc)) : size(inc);
-            for (var i = 0; i < limit; i += 1)
-            {
-                const other = inc[i][0];
-                const aa = min(n, other);
-                const bb = max(n, other);
-                keepSet[aa ~ "_" ~ bb] = [aa, bb];
+                keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
         var keptEdges = [];
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 5. Draw rib centerlines ----------------------------------------
+        // ----- 7. Draw rib centerlines ----------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
@@ -260,28 +264,28 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         if (definition.drawHoleCircles)
         {
-            for (var i = 0; i < nHoles; i += 1)
+            for (var i = 0; i < nHoleNodes; i += 1)
             {
                 skCircle(ribSketch, "holeRef" ~ i, {
-                            "center" : vector(holePts[i][0] * millimeter, holePts[i][1] * millimeter),
-                            "radius" : holeRadii[i] * millimeter
+                            "center" : vector(holeNodes[i][0] * millimeter, holeNodes[i][1] * millimeter),
+                            "radius" : holeNodeRadii[i] * millimeter
                         });
             }
         }
         skSolve(ribSketch);
 
-        // ----- 6. Optional pocket profiles (bosses + offset rib edges) --------
+        // ----- 8. Optional pocket profiles (bosses + offset rib edges) --------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
             const halfW = (definition.ribWidth / millimeter) / 2;
             const bossExtra = definition.bossOffset / millimeter;
 
-            for (var i = 0; i < nHoles; i += 1)
+            for (var i = 0; i < nHoleNodes; i += 1)
             {
                 skCircle(pocketSketch, "boss" ~ i, {
-                            "center" : vector(holePts[i][0] * millimeter, holePts[i][1] * millimeter),
-                            "radius" : (holeRadii[i] + bossExtra) * millimeter
+                            "center" : vector(holeNodes[i][0] * millimeter, holeNodes[i][1] * millimeter),
+                            "radius" : (holeNodeRadii[i] + bossExtra) * millimeter
                         });
             }
 
@@ -297,11 +301,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     continue;
                 const nx = -dy / len;
                 const ny =  dx / len;
-                for (var s in [halfW, -halfW])
+                for (var sgn in [halfW, -halfW])
                 {
                     skLineSegment(pocketSketch, "edge" ~ ofs, {
-                                "start" : vector((pa[0] + nx * s) * millimeter, (pa[1] + ny * s) * millimeter),
-                                "end"   : vector((pb[0] + nx * s) * millimeter, (pb[1] + ny * s) * millimeter)
+                                "start" : vector((pa[0] + nx * sgn) * millimeter, (pa[1] + ny * sgn) * millimeter),
+                                "end"   : vector((pb[0] + nx * sgn) * millimeter, (pb[1] + ny * sgn) * millimeter)
                             });
                     ofs += 1;
                 }
@@ -309,7 +313,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             skSolve(pocketSketch);
         }
 
-        reportFeatureInfo(context, id, nHoles ~ " anchors, " ~ size(keptEdges) ~ " struts drawn.");
+        reportFeatureInfo(context, id, size(keptEdges) ~ " struts on a " ~ round(s) ~ " mm triangle lattice.");
     });
 
 // ===== Helper functions ====================================================
@@ -321,41 +325,128 @@ function pointDistance(a is array, b is array) returns number
     return sqrt(dx * dx + dy * dy);
 }
 
-function sortPairsByLength(arr is array) returns array
-{
-    var a = arr;
-    for (var i = 0; i < size(a); i += 1)
-    {
-        var mi = i;
-        for (var j = i + 1; j < size(a); j += 1)
-        {
-            if (a[j][1] < a[mi][1])
-                mi = j;
-        }
-        if (mi != i)
-        {
-            const tmp = a[i];
-            a[i] = a[mi];
-            a[mi] = tmp;
-        }
-    }
-    return a;
-}
-
 function dedupePoints(pts is array, tol is number) returns array
 {
     var out = [];
     for (var p in pts)
     {
-        var duplicate = false;
+        var dup = false;
         for (var q in out)
         {
-            if (pointDistance(p, q) < tol) { duplicate = true; break; }
+            if (pointDistance(p, q) < tol) { dup = true; break; }
         }
-        if (!duplicate)
+        if (!dup)
             out = append(out, p);
     }
     return out;
+}
+
+function pointInPolygon(poly is array, p is array) returns boolean
+{
+    var inside = false;
+    const n = size(poly);
+    var j = n - 1;
+    for (var i = 0; i < n; i += 1)
+    {
+        const yi = poly[i][1];
+        const yj = poly[j][1];
+        if ((yi > p[1]) != (yj > p[1]))
+        {
+            const xcross = (poly[j][0] - poly[i][0]) * (p[1] - yi) / (yj - yi) + poly[i][0];
+            if (p[0] < xcross)
+                inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
+}
+
+function distPointToSegment(p is array, a is array, b is array) returns number
+{
+    const vx = b[0] - a[0];
+    const vy = b[1] - a[1];
+    const wx = p[0] - a[0];
+    const wy = p[1] - a[1];
+    const c1 = vx * wx + vy * wy;
+    if (c1 <= 0)
+        return pointDistance(p, a);
+    const c2 = vx * vx + vy * vy;
+    if (c2 <= c1)
+        return pointDistance(p, b);
+    const t = c1 / c2;
+    return pointDistance(p, [a[0] + t * vx, a[1] + t * vy]);
+}
+
+function distToPolygon(poly is array, p is array) returns number
+{
+    var best = 1e18;
+    const n = size(poly);
+    var j = n - 1;
+    for (var i = 0; i < n; i += 1)
+    {
+        best = min(best, distPointToSegment(p, poly[j], poly[i]));
+        j = i;
+    }
+    return best;
+}
+
+function polygonArea(poly is array) returns number
+{
+    var a = 0;
+    const n = size(poly);
+    var j = n - 1;
+    for (var i = 0; i < n; i += 1)
+    {
+        a += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+        j = i;
+    }
+    return abs(a) / 2;
+}
+
+// Chain edge polylines end-to-end into closed loops; return the largest (outer).
+function buildBoundaryPolygon(polylines is array) returns array
+{
+    const tol = 0.5;
+    var used = [];
+    for (var i = 0; i < size(polylines); i += 1)
+        used = append(used, false);
+
+    var bestLoop = [];
+    var bestArea = -1;
+    for (var startI = 0; startI < size(polylines); startI += 1)
+    {
+        if (used[startI])
+            continue;
+        var loop = polylines[startI];
+        used[startI] = true;
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            const endP = loop[size(loop) - 1];
+            for (var k = 0; k < size(polylines); k += 1)
+            {
+                if (used[k])
+                    continue;
+                const pl = polylines[k];
+                if (pointDistance(endP, pl[0]) < tol)
+                {
+                    for (var m = 1; m < size(pl); m += 1)
+                        loop = append(loop, pl[m]);
+                    used[k] = true; changed = true; break;
+                }
+                else if (pointDistance(endP, pl[size(pl) - 1]) < tol)
+                {
+                    for (var m = size(pl) - 2; m >= 0; m -= 1)
+                        loop = append(loop, pl[m]);
+                    used[k] = true; changed = true; break;
+                }
+            }
+        }
+        const area = polygonArea(loop);
+        if (area > bestArea) { bestArea = area; bestLoop = loop; }
+    }
+    return bestLoop;
 }
 
 // Delaunay triangulation (Bowyer-Watson). In: array of [x,y]. Out: array of [i,j,k].
