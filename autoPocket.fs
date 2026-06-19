@@ -67,7 +67,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
 
-        annotation { "Name" : "Snap lattice to holes" }
+        annotation { "Name" : "Snap lattice to holes", "Default" : true }
         definition.snapToHoles is boolean;
 
         annotation { "Name" : "Draw reference circles at holes" }
