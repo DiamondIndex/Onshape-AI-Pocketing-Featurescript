@@ -3,12 +3,12 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 
 // AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
-// Lays a regular equilateral-triangle lattice over the plate, then SNAPS the
-// nearest lattice node onto each hole so the hole becomes a regular grid
-// vertex. This keeps the triangulation uniform (~6 even triangles around every
-// node) while making every hole a strut vertex; the un-snapped lattice nodes
-// are the extra "strut intersection" vertices. Non-circular slots get a solid
-// reinforced band.
+// Lays a regular equilateral-triangle lattice over the plate and snaps the
+// nearest lattice node onto each (well-spaced) hole, so holes are vertices and
+// triangles stay uniform. Tight clusters of holes are collapsed into a single
+// SOLID boss (hatch-filled so the downstream cut keeps it solid), which avoids
+// tiny triangles and stops cluster holes from severing ribs. Non-circular
+// slots get a reinforced band.
 
 // ===== Parameter bounds ====================================================
 
@@ -213,69 +213,105 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             row += 1;
         }
 
-        // ----- 5. Snap the nearest free lattice node onto each hole -----------
+        // ----- 5. Snap singles to the lattice; collapse clusters to bosses ----
         var gridIsHole = [];
         var gridRadius = [];
+        var gridIsCluster = [];
         for (var i = 0; i < size(gridPts); i += 1)
         {
             gridIsHole = append(gridIsHole, false);
             gridRadius = append(gridRadius, 0);
+            gridIsCluster = append(gridIsCluster, false);
         }
         if (definition.snapToHoles)
         {
+            const clusterDist = 0.6 * s;     // holes within this of each other form a cluster
             const snapMax = 1.3 * s;
-            const dropDist = 0.7 * s;   // holes packed closer than this are NOT made vertices
 
-            // Process larger holes first so structural holes win over tiny pilot holes.
-            var order = [];
+            var cUsed = [];
             for (var i = 0; i < size(dHolePts); i += 1)
-                order = append(order, [i, dHoleRadii[i]]);
-            order = sortByValueDesc(order);
+                cUsed = append(cUsed, false);
+            var orderC = [];
+            for (var i = 0; i < size(dHolePts); i += 1)
+                orderC = append(orderC, [i, dHoleRadii[i]]);
+            orderC = sortByValueDesc(orderC);
 
-            var keptHolePos = [];
-            for (var oi = 0; oi < size(order); oi += 1)
+            for (var oi = 0; oi < size(orderC); oi += 1)
             {
-                const hi = order[oi][0];
-                const hp = dHolePts[hi];
-
-                var skip = false;
-                for (var kp in keptHolePos)
+                const hi = orderC[oi][0];
+                if (cUsed[hi])
+                    continue;
+                var members = [hi];
+                cUsed[hi] = true;
+                for (var hj = 0; hj < size(dHolePts); hj += 1)
                 {
-                    if (pointDistance(hp, kp) < dropDist) { skip = true; break; }
-                }
-                if (skip)
-                    continue;       // too close to a kept hole -> stays a plain hole, keeps lattice even
-
-                var bestG = -1;
-                var bestD = snapMax;
-                for (var g = 0; g < size(gridPts); g += 1)
-                {
-                    if (gridIsHole[g])
+                    if (cUsed[hj])
                         continue;
-                    const d = pointDistance(hp, gridPts[g]);
-                    if (d < bestD) { bestD = d; bestG = g; }
+                    if (pointDistance(dHolePts[hi], dHolePts[hj]) < clusterDist)
+                    {
+                        members = append(members, hj);
+                        cUsed[hj] = true;
+                    }
                 }
-                if (bestG >= 0)
+
+                if (size(members) == 1)
                 {
-                    gridPts[bestG] = hp;
-                    gridIsHole[bestG] = true;
-                    gridRadius[bestG] = dHoleRadii[hi];
-                    keptHolePos = append(keptHolePos, hp);
+                    // Lone hole -> snap nearest free lattice node onto it (uniform).
+                    const hp = dHolePts[hi];
+                    var bestG = -1;
+                    var bestD = snapMax;
+                    for (var g = 0; g < size(gridPts); g += 1)
+                    {
+                        if (gridIsHole[g])
+                            continue;
+                        const d = pointDistance(hp, gridPts[g]);
+                        if (d < bestD) { bestD = d; bestG = g; }
+                    }
+                    if (bestG >= 0)
+                    {
+                        gridPts[bestG] = hp;
+                        gridIsHole[bestG] = true;
+                        gridRadius[bestG] = dHoleRadii[hi];
+                    }
+                }
+                else
+                {
+                    // Cluster -> one solid boss vertex at the centroid.
+                    var cx = 0;
+                    var cy = 0;
+                    for (var m in members) { cx += dHolePts[m][0]; cy += dHolePts[m][1]; }
+                    cx = cx / size(members);
+                    cy = cy / size(members);
+                    var R = 0;
+                    for (var m in members)
+                    {
+                        const rr = pointDistance([cx, cy], dHolePts[m]) + dHoleRadii[m];
+                        if (rr > R) R = rr;
+                    }
+                    R = R + 0.12 * s;
+                    gridPts = append(gridPts, [cx, cy]);
+                    gridIsHole = append(gridIsHole, true);
+                    gridRadius = append(gridRadius, R);
+                    gridIsCluster = append(gridIsCluster, true);
                 }
             }
         }
 
-        // ----- 6. Drop free lattice nodes that sit too close to a hole --------
-        // (prevents slivers next to a snapped hole; keeps triangles even).
-        var holePos = [];
+        // ----- 6. Drop free lattice nodes inside a hole/boss clearance --------
+        var holeInfo = [];
         for (var g = 0; g < size(gridPts); g += 1)
+        {
             if (gridIsHole[g])
-                holePos = append(holePos, gridPts[g]);
-        const sliver = 0.45 * s;
+            {
+                const clr = gridIsCluster[g] ? (gridRadius[g] + 0.2 * s) : (0.45 * s);
+                holeInfo = append(holeInfo, [gridPts[g], clr]);
+            }
+        }
 
         var nodePts = [];
         var nodeIsHole = [];
         var nodeRadius = [];
+        var nodeIsCluster = [];
         for (var g = 0; g < size(gridPts); g += 1)
         {
             if (gridIsHole[g])
@@ -283,19 +319,21 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 nodePts = append(nodePts, gridPts[g]);
                 nodeIsHole = append(nodeIsHole, true);
                 nodeRadius = append(nodeRadius, gridRadius[g]);
+                nodeIsCluster = append(nodeIsCluster, gridIsCluster[g]);
             }
             else
             {
                 var tooClose = false;
-                for (var hp in holePos)
+                for (var hinf in holeInfo)
                 {
-                    if (pointDistance(gridPts[g], hp) < sliver) { tooClose = true; break; }
+                    if (pointDistance(gridPts[g], hinf[0]) < hinf[1]) { tooClose = true; break; }
                 }
                 if (!tooClose)
                 {
                     nodePts = append(nodePts, gridPts[g]);
                     nodeIsHole = append(nodeIsHole, false);
                     nodeRadius = append(nodeRadius, 0);
+                    nodeIsCluster = append(nodeIsCluster, false);
                 }
             }
         }
@@ -317,9 +355,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (size(pts) < 3)
             throw regenError("Plate too small for this triangle size; reduce 'Triangle side length'.", ["cellSize"]);
 
-        // ----- 8. Triangulate, clipping to the material (all triangles) -------
+        // ----- 8. Triangulate, clipping to the material -----------------------
         const triangles = bowyerWatson(pts);
-        const maxEdge = 1.9 * s;
+        const maxEdge = 2.2 * s;
         var keepSet = {};
         for (var tri in triangles)
         {
@@ -343,7 +381,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 9. Draw rib centerlines ----------------------------------------
+        // ----- 9. Draw rib centerlines + solid hatch-fill for cluster bosses --
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
@@ -357,11 +395,37 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             ribIndex += 1;
         }
 
+        // Hatch the cluster bosses so the downstream cut keeps them solid.
+        const hatchStep = max(2.0, 0.1 * s);
+        var hatchIdx = 0;
+        for (var i = 0; i < nNodes; i += 1)
+        {
+            if (!nodeIsCluster[i])
+                continue;
+            const cx = nodePts[i][0];
+            const cy = nodePts[i][1];
+            const R = nodeRadius[i];
+            var hy = cy - R;
+            while (hy <= cy + R)
+            {
+                const halfw = sqrt(max(0, R * R - (hy - cy) * (hy - cy)));
+                if (halfw > 0.5 && inMaterial(poly, innerLoops, [cx, hy]))
+                {
+                    skLineSegment(ribSketch, "fill" ~ hatchIdx, {
+                                "start" : vector((cx - halfw) * millimeter, hy * millimeter),
+                                "end"   : vector((cx + halfw) * millimeter, hy * millimeter)
+                            });
+                    hatchIdx += 1;
+                }
+                hy += hatchStep;
+            }
+        }
+
         if (definition.drawHoleCircles)
         {
             for (var i = 0; i < nNodes; i += 1)
             {
-                if (nodeIsHole[i])
+                if (nodeIsHole[i] && !nodeIsCluster[i])
                 {
                     skCircle(ribSketch, "holeRef" ~ i, {
                                 "center" : vector(nodePts[i][0] * millimeter, nodePts[i][1] * millimeter),
