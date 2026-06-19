@@ -3,11 +3,11 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 
 // AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
-// Instead of triangulating the (irregularly spaced) holes -- which gives
-// uneven pockets -- this lays a REGULAR equilateral-triangle lattice over the
-// plate, snaps lattice nodes onto the holes, clips everything to the plate
-// outline, and triangulates. The result is an even web of same-size triangles
-// with every hole supported from all sides, like a hand-pocketed plate.
+// Lays a regular equilateral-triangle lattice over the plate, snaps it onto
+// the holes, clips to the plate outline (and any inner slots), then keeps the
+// strut network within bounds: every hole is a vertex with between 3 and
+// "Max struts per hole" struts, rows of holes read as lines, and non-circular
+// slots get a reinforced solid band.
 
 // ===== Parameter bounds ====================================================
 
@@ -24,6 +24,17 @@ export const MARGIN_BOUNDS = {
             (millimeter) : 6.0,
             (inch)       : 0.25
         } as LengthBoundSpec;
+
+export const SLOT_BOUNDS = {
+            (meter)      : [0.0, 0.012, 0.2],
+            (centimeter) : 1.2,
+            (millimeter) : 12.0,
+            (inch)       : 0.5
+        } as LengthBoundSpec;
+
+export const STRUT_BOUNDS = {
+            (unitless) : [3, 6, 12]
+        } as IntegerBoundSpec;
 
 export const RIB_WIDTH_BOUNDS = {
             (meter)      : [1e-4, 0.004, 0.1],
@@ -64,6 +75,12 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Margin from plate edge" }
         isLength(definition.edgeMargin, MARGIN_BOUNDS);
 
+        annotation { "Name" : "Max struts per hole" }
+        isInteger(definition.maxStrutsPerHole, STRUT_BOUNDS);
+
+        annotation { "Name" : "Material band around slots" }
+        isLength(definition.slotMargin, SLOT_BOUNDS);
+
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
 
@@ -91,13 +108,14 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         const plane = evPlane(context, { "face" : definition.face });
         const minRadiusMm = (definition.minHoleDiameter / 2) / millimeter;
-        const s = definition.cellSize / millimeter;          // triangle edge length, mm
+        const s = definition.cellSize / millimeter;
         const marginMm = definition.edgeMargin / millimeter;
+        const slotMarginMm = definition.slotMargin / millimeter;
 
-        // ----- 1. Read holes and the plate outline ----------------------------
+        // ----- 1. Read holes and outline edges --------------------------------
         var holePts = [];
         var holeRadii = [];
-        var polylines = [];   // boundary edges, each as an ordered list of [x,y]
+        var polylines = [];
 
         for (var edge in evaluateQuery(context, qLoopEdges(definition.face)))
         {
@@ -123,7 +141,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
             if (!isHole)
             {
-                // Sample this boundary edge into an ordered polyline.
                 var pl = [];
                 for (var i = 0; i < 6; i += 1)
                 {
@@ -140,16 +157,26 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
-        if (size(polylines) < 2)
+        // ----- 2. Outer outline + inner cutouts (slots) -----------------------
+        const loops = buildLoops(polylines);
+        if (size(loops) == 0)
             throw regenError("Could not read the plate outline from this face.", ["face"]);
+        var outerIdx = 0;
+        var maxA = -1;
+        for (var i = 0; i < size(loops); i += 1)
+        {
+            const ar = polygonArea(loops[i]);
+            if (ar > maxA) { maxA = ar; outerIdx = i; }
+        }
+        const poly = loops[outerIdx];
+        var innerLoops = [];
+        for (var i = 0; i < size(loops); i += 1)
+        {
+            if (i != outerIdx && polygonArea(loops[i]) > (0.3 * s) * (0.3 * s))
+                innerLoops = append(innerLoops, loops[i]);
+        }
 
-        // Chain the boundary edges into one closed outline polygon (mm).
-        const poly = buildBoundaryPolygon(polylines);
-        if (size(poly) < 3)
-            throw regenError("Could not form a closed plate outline.", ["face"]);
-
-        // ----- 2. Merge holes that are too close (avoids micro-pockets) -------
-        // Keep EVERY hole as a strut vertex (only drop exact duplicates).
+        // ----- 3. Keep EVERY hole as a strut vertex (drop only duplicates) ----
         var mHolePts = [];
         var mHoleRadii = [];
         for (var i = 0; i < size(holePts); i += 1)
@@ -162,7 +189,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             if (!dup) { mHolePts = append(mHolePts, holePts[i]); mHoleRadii = append(mHoleRadii, holeRadii[i]); }
         }
 
-        // ----- 3. Generate the equilateral-triangle lattice inside the plate --
+        // ----- 4. Equilateral lattice inside the material ---------------------
         var bMinX = poly[0][0]; var bMaxX = poly[0][0];
         var bMinY = poly[0][1]; var bMaxY = poly[0][1];
         for (var p in poly)
@@ -171,7 +198,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             bMinY = min(bMinY, p[1]); bMaxY = max(bMaxY, p[1]);
         }
         const rowH = s * sqrt(3) / 2;
-        const holeClear = 0.55 * s;
+        const holeClear = 0.65 * s;
 
         var latticePts = [];
         var row = 0;
@@ -183,7 +210,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             while (x <= bMaxX)
             {
                 const q = [x, y];
-                if (pointInPolygon(poly, q) && distToPolygon(poly, q) >= marginMm)
+                if (inMaterial(poly, innerLoops, q)
+                        && distToPolygon(poly, q) >= marginMm
+                        && distToInners(innerLoops, q) >= slotMarginMm)
                 {
                     var clearOfHoles = true;
                     if (definition.snapToHoles)
@@ -202,9 +231,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             row += 1;
         }
 
-        // ----- 4. Sample the outline at ~s spacing so the rim triangulates ----
+        // ----- 5. Sample the outer rim at ~s spacing --------------------------
         var rimPts = [];
-        var acc = s; // force first point
+        var acc = s;
         for (var i = 0; i < size(poly); i += 1)
         {
             const a = poly[i];
@@ -214,15 +243,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         rimPts = dedupePoints(rimPts, 0.25 * s);
 
-        // ----- 5. Assemble nodes: holes first, then lattice + rim -------------
+        // ----- 6. Assemble nodes: holes first, then lattice + rim -------------
         const holeNodes = (definition.snapToHoles) ? mHolePts : [];
         const holeNodeRadii = (definition.snapToHoles) ? mHoleRadii : [];
         const nHoleNodes = size(holeNodes);
         const pts = concatenateArrays([holeNodes, latticePts, rimPts]);
         if (size(pts) < 3)
-            throw regenError("Plate too small for this triangle size; reduce 'Triangle size'.", ["cellSize"]);
+            throw regenError("Plate too small for this triangle size; reduce 'Triangle side length'.", ["cellSize"]);
 
-        // ----- 6. Triangulate and keep only interior lattice edges ------------
+        // ----- 7. Triangulate, clipping to the material -----------------------
         const triangles = bowyerWatson(pts);
         const maxEdge = 1.8 * s;
         var keepSet = {};
@@ -239,15 +268,17 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 if (L < 0.001 || L > maxEdge)
                     continue;
                 const mid = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
-                if (!pointInPolygon(poly, mid))
+                if (!inMaterial(poly, innerLoops, mid))
                     continue;
                 keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
-        // Link every hole to its nearest neighbouring hole, so a row of holes
-        // reads as one continuous LINE that struts attach to (rather than the
-        // lattice fanning a separate strut to each individual hole).
+
+        // ----- 8. Link each hole to its nearest hole (rows read as lines) -----
         const lineDist = 1.0 * s;
+        var nearestHole = [];
+        for (var i = 0; i < nHoleNodes; i += 1)
+            nearestHole = append(nearestHole, -1);
         for (var h = 0; h < nHoleNodes; h += 1)
         {
             var best = -1;
@@ -261,24 +292,24 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
             if (best >= 0)
             {
+                nearestHole[h] = best;
                 const a = min(h, best);
                 const b = max(h, best);
                 const mid = [(pts[a][0] + pts[b][0]) / 2, (pts[a][1] + pts[b][1]) / 2];
-                if (pointInPolygon(poly, mid))
+                if (inMaterial(poly, innerLoops, mid))
                     keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
 
-        // Requirement: every hole is a vertex with at least 3 struts. Add each
-        // under-connected hole's shortest valid links until it reaches 3.
+        // ----- 9. Floor: every hole gets at least 3 struts --------------------
         var deg = [];
-        for (var i = 0; i < nHoleNodes; i += 1)
+        for (var i = 0; i < size(pts); i += 1)
             deg = append(deg, 0);
         for (var key in keys(keepSet))
         {
             const e = keepSet[key];
-            if (e[0] < nHoleNodes) deg[e[0]] += 1;
-            if (e[1] < nHoleNodes) deg[e[1]] += 1;
+            deg[e[0]] += 1;
+            deg[e[1]] += 1;
         }
         for (var h = 0; h < nHoleNodes; h += 1)
         {
@@ -294,7 +325,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 if (keepSet[a ~ "_" ~ b] != undefined)
                     continue;
                 const mid = [(pts[h][0] + pts[n][0]) / 2, (pts[h][1] + pts[n][1]) / 2];
-                if (!pointInPolygon(poly, mid))
+                if (!inMaterial(poly, innerLoops, mid))
                     continue;
                 cands = append(cands, [n, pointDistance(pts[h], pts[n])]);
             }
@@ -307,16 +338,57 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 const b = max(h, n);
                 keepSet[a ~ "_" ~ b] = [a, b];
                 deg[h] += 1;
-                if (n < nHoleNodes) deg[n] += 1;
+                deg[n] += 1;
                 idx += 1;
+            }
+        }
+
+        // ----- 10. Cap: trim over-connected holes to "Max struts per hole" ----
+        // Removes each hole's LONGEST excess struts, but never its line-link
+        // and never drops another hole below 3. This merges the tiny clustered
+        // triangles into larger, more even pockets.
+        const cap = definition.maxStrutsPerHole;
+        var removed = {};
+        for (var h = 0; h < nHoleNodes; h += 1)
+        {
+            while (deg[h] > cap)
+            {
+                var bestN = -1;
+                var bestLen = -1;
+                for (var n = 0; n < size(pts); n += 1)
+                {
+                    if (n == h)
+                        continue;
+                    const a = min(h, n);
+                    const b = max(h, n);
+                    const key = a ~ "_" ~ b;
+                    if (keepSet[key] == undefined || removed[key] != undefined)
+                        continue;
+                    if (n < nHoleNodes && (nearestHole[h] == n || nearestHole[n] == h))
+                        continue;                       // keep the line-link
+                    if (n < nHoleNodes && deg[n] <= 3)
+                        continue;                       // keep neighbour's floor
+                    const L = pointDistance(pts[h], pts[n]);
+                    if (L > bestLen) { bestLen = L; bestN = n; }
+                }
+                if (bestN < 0)
+                    break;
+                const a = min(h, bestN);
+                const b = max(h, bestN);
+                removed[a ~ "_" ~ b] = true;
+                deg[h] -= 1;
+                deg[bestN] -= 1;
             }
         }
 
         var keptEdges = [];
         for (var key in keys(keepSet))
-            keptEdges = append(keptEdges, keepSet[key]);
+        {
+            if (removed[key] == undefined)
+                keptEdges = append(keptEdges, keepSet[key]);
+        }
 
-        // ----- 7. Draw rib centerlines ----------------------------------------
+        // ----- 11. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
@@ -342,7 +414,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         skSolve(ribSketch);
 
-        // ----- 8. Optional pocket profiles (bosses + offset rib edges) --------
+        // ----- 12. Optional pocket profiles -----------------------------------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
@@ -450,6 +522,19 @@ function pointInPolygon(poly is array, p is array) returns boolean
     return inside;
 }
 
+// In solid material = inside the outer outline and outside every inner cutout.
+function inMaterial(outer is array, inners is array, p is array) returns boolean
+{
+    if (!pointInPolygon(outer, p))
+        return false;
+    for (var inr in inners)
+    {
+        if (pointInPolygon(inr, p))
+            return false;
+    }
+    return true;
+}
+
 function distPointToSegment(p is array, a is array, b is array) returns number
 {
     const vx = b[0] - a[0];
@@ -479,6 +564,14 @@ function distToPolygon(poly is array, p is array) returns number
     return best;
 }
 
+function distToInners(inners is array, p is array) returns number
+{
+    var best = 1e18;
+    for (var inr in inners)
+        best = min(best, distToPolygon(inr, p));
+    return best;
+}
+
 function polygonArea(poly is array) returns number
 {
     var a = 0;
@@ -492,16 +585,15 @@ function polygonArea(poly is array) returns number
     return abs(a) / 2;
 }
 
-// Chain edge polylines end-to-end into closed loops; return the largest (outer).
-function buildBoundaryPolygon(polylines is array) returns array
+// Chain edge polylines end-to-end into closed loops (outer outline + slots).
+function buildLoops(polylines is array) returns array
 {
     const tol = 0.5;
     var used = [];
     for (var i = 0; i < size(polylines); i += 1)
         used = append(used, false);
 
-    var bestLoop = [];
-    var bestArea = -1;
+    var loops = [];
     for (var startI = 0; startI < size(polylines); startI += 1)
     {
         if (used[startI])
@@ -532,10 +624,9 @@ function buildBoundaryPolygon(polylines is array) returns array
                 }
             }
         }
-        const area = polygonArea(loop);
-        if (area > bestArea) { bestArea = area; bestLoop = loop; }
+        loops = append(loops, loop);
     }
-    return bestLoop;
+    return loops;
 }
 
 // Delaunay triangulation (Bowyer-Watson). In: array of [x,y]. Out: array of [i,j,k].
