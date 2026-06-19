@@ -3,11 +3,12 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 
 // AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
-// Lays a regular equilateral-triangle lattice over the plate, snaps it onto
-// the holes, clips to the plate outline (and any inner slots), then keeps the
-// strut network within bounds: every hole is a vertex with between 3 and
-// "Max struts per hole" struts, rows of holes read as lines, and non-circular
-// slots get a reinforced solid band.
+// Lays a regular equilateral-triangle lattice over the plate, then SNAPS the
+// nearest lattice node onto each hole so the hole becomes a regular grid
+// vertex. This keeps the triangulation uniform (~6 even triangles around every
+// node) while making every hole a strut vertex; the un-snapped lattice nodes
+// are the extra "strut intersection" vertices. Non-circular slots get a solid
+// reinforced band.
 
 // ===== Parameter bounds ====================================================
 
@@ -31,10 +32,6 @@ export const SLOT_BOUNDS = {
             (millimeter) : 12.0,
             (inch)       : 0.5
         } as LengthBoundSpec;
-
-export const STRUT_BOUNDS = {
-            (unitless) : [3, 6, 12]
-        } as IntegerBoundSpec;
 
 export const RIB_WIDTH_BOUNDS = {
             (meter)      : [1e-4, 0.004, 0.1],
@@ -74,9 +71,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Margin from plate edge" }
         isLength(definition.edgeMargin, MARGIN_BOUNDS);
-
-        annotation { "Name" : "Max struts per hole" }
-        isInteger(definition.maxStrutsPerHole, STRUT_BOUNDS);
 
         annotation { "Name" : "Material band around slots" }
         isLength(definition.slotMargin, SLOT_BOUNDS);
@@ -176,20 +170,20 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 innerLoops = append(innerLoops, loops[i]);
         }
 
-        // ----- 3. Keep EVERY hole as a strut vertex (drop only duplicates) ----
-        var mHolePts = [];
-        var mHoleRadii = [];
+        // ----- 3. Drop duplicate holes ----------------------------------------
+        var dHolePts = [];
+        var dHoleRadii = [];
         for (var i = 0; i < size(holePts); i += 1)
         {
             var dup = false;
-            for (var j = 0; j < size(mHolePts); j += 1)
+            for (var j = 0; j < size(dHolePts); j += 1)
             {
-                if (pointDistance(holePts[i], mHolePts[j]) < 1.0) { dup = true; break; }
+                if (pointDistance(holePts[i], dHolePts[j]) < 1.0) { dup = true; break; }
             }
-            if (!dup) { mHolePts = append(mHolePts, holePts[i]); mHoleRadii = append(mHoleRadii, holeRadii[i]); }
+            if (!dup) { dHolePts = append(dHolePts, holePts[i]); dHoleRadii = append(dHoleRadii, holeRadii[i]); }
         }
 
-        // ----- 4. Equilateral lattice inside the material ---------------------
+        // ----- 4. Full regular equilateral lattice inside the material --------
         var bMinX = poly[0][0]; var bMaxX = poly[0][0];
         var bMinY = poly[0][1]; var bMaxY = poly[0][1];
         for (var p in poly)
@@ -198,9 +192,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             bMinY = min(bMinY, p[1]); bMaxY = max(bMaxY, p[1]);
         }
         const rowH = s * sqrt(3) / 2;
-        const holeClear = 0.65 * s;
 
-        var latticePts = [];
+        var gridPts = [];
         var row = 0;
         var y = bMinY;
         while (y <= bMaxY)
@@ -213,25 +206,86 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 if (inMaterial(poly, innerLoops, q)
                         && distToPolygon(poly, q) >= marginMm
                         && distToInners(innerLoops, q) >= slotMarginMm)
-                {
-                    var clearOfHoles = true;
-                    if (definition.snapToHoles)
-                    {
-                        for (var h in mHolePts)
-                        {
-                            if (pointDistance(q, h) < holeClear) { clearOfHoles = false; break; }
-                        }
-                    }
-                    if (clearOfHoles)
-                        latticePts = append(latticePts, q);
-                }
+                    gridPts = append(gridPts, q);
                 x += s;
             }
             y += rowH;
             row += 1;
         }
 
-        // ----- 5. Sample the outer rim at ~s spacing --------------------------
+        // ----- 5. Snap the nearest free lattice node onto each hole -----------
+        var gridIsHole = [];
+        var gridRadius = [];
+        for (var i = 0; i < size(gridPts); i += 1)
+        {
+            gridIsHole = append(gridIsHole, false);
+            gridRadius = append(gridRadius, 0);
+        }
+        if (definition.snapToHoles)
+        {
+            const snapMax = 1.3 * s;
+            for (var hi = 0; hi < size(dHolePts); hi += 1)
+            {
+                var bestG = -1;
+                var bestD = snapMax;
+                for (var g = 0; g < size(gridPts); g += 1)
+                {
+                    if (gridIsHole[g])
+                        continue;
+                    const d = pointDistance(dHolePts[hi], gridPts[g]);
+                    if (d < bestD) { bestD = d; bestG = g; }
+                }
+                if (bestG >= 0)
+                {
+                    gridPts[bestG] = dHolePts[hi];
+                    gridIsHole[bestG] = true;
+                    gridRadius[bestG] = dHoleRadii[hi];
+                }
+                else
+                {
+                    gridPts = append(gridPts, dHolePts[hi]);
+                    gridIsHole = append(gridIsHole, true);
+                    gridRadius = append(gridRadius, dHoleRadii[hi]);
+                }
+            }
+        }
+
+        // ----- 6. Drop free lattice nodes that sit too close to a hole --------
+        // (prevents slivers next to a snapped hole; keeps triangles even).
+        var holePos = [];
+        for (var g = 0; g < size(gridPts); g += 1)
+            if (gridIsHole[g])
+                holePos = append(holePos, gridPts[g]);
+        const sliver = 0.45 * s;
+
+        var nodePts = [];
+        var nodeIsHole = [];
+        var nodeRadius = [];
+        for (var g = 0; g < size(gridPts); g += 1)
+        {
+            if (gridIsHole[g])
+            {
+                nodePts = append(nodePts, gridPts[g]);
+                nodeIsHole = append(nodeIsHole, true);
+                nodeRadius = append(nodeRadius, gridRadius[g]);
+            }
+            else
+            {
+                var tooClose = false;
+                for (var hp in holePos)
+                {
+                    if (pointDistance(gridPts[g], hp) < sliver) { tooClose = true; break; }
+                }
+                if (!tooClose)
+                {
+                    nodePts = append(nodePts, gridPts[g]);
+                    nodeIsHole = append(nodeIsHole, false);
+                    nodeRadius = append(nodeRadius, 0);
+                }
+            }
+        }
+
+        // ----- 7. Sample the outer rim at ~s spacing --------------------------
         var rimPts = [];
         var acc = s;
         for (var i = 0; i < size(poly); i += 1)
@@ -241,19 +295,16 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             acc += pointDistance(a, b);
             if (acc >= s) { rimPts = append(rimPts, a); acc = 0; }
         }
-        rimPts = dedupePoints(rimPts, 0.25 * s);
+        rimPts = dedupePoints(rimPts, 0.4 * s);
 
-        // ----- 6. Assemble nodes: holes first, then lattice + rim -------------
-        const holeNodes = (definition.snapToHoles) ? mHolePts : [];
-        const holeNodeRadii = (definition.snapToHoles) ? mHoleRadii : [];
-        const nHoleNodes = size(holeNodes);
-        const pts = concatenateArrays([holeNodes, latticePts, rimPts]);
+        const nNodes = size(nodePts);
+        const pts = concatenateArrays([nodePts, rimPts]);
         if (size(pts) < 3)
             throw regenError("Plate too small for this triangle size; reduce 'Triangle side length'.", ["cellSize"]);
 
-        // ----- 7. Triangulate, clipping to the material -----------------------
+        // ----- 8. Triangulate, clipping to the material (all triangles) -------
         const triangles = bowyerWatson(pts);
-        const maxEdge = 1.8 * s;
+        const maxEdge = 1.9 * s;
         var keepSet = {};
         for (var tri in triangles)
         {
@@ -273,122 +324,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
-
-        // ----- 8. Link each hole to its nearest hole (rows read as lines) -----
-        const lineDist = 1.0 * s;
-        var nearestHole = [];
-        for (var i = 0; i < nHoleNodes; i += 1)
-            nearestHole = append(nearestHole, -1);
-        for (var h = 0; h < nHoleNodes; h += 1)
-        {
-            var best = -1;
-            var bestL = lineDist;
-            for (var g = 0; g < nHoleNodes; g += 1)
-            {
-                if (g == h)
-                    continue;
-                const L = pointDistance(pts[h], pts[g]);
-                if (L < bestL) { bestL = L; best = g; }
-            }
-            if (best >= 0)
-            {
-                nearestHole[h] = best;
-                const a = min(h, best);
-                const b = max(h, best);
-                const mid = [(pts[a][0] + pts[b][0]) / 2, (pts[a][1] + pts[b][1]) / 2];
-                if (inMaterial(poly, innerLoops, mid))
-                    keepSet[a ~ "_" ~ b] = [a, b];
-            }
-        }
-
-        // ----- 9. Floor: every hole gets at least 3 struts --------------------
-        var deg = [];
-        for (var i = 0; i < size(pts); i += 1)
-            deg = append(deg, 0);
-        for (var key in keys(keepSet))
-        {
-            const e = keepSet[key];
-            deg[e[0]] += 1;
-            deg[e[1]] += 1;
-        }
-        for (var h = 0; h < nHoleNodes; h += 1)
-        {
-            if (deg[h] >= 3)
-                continue;
-            var cands = [];
-            for (var n = 0; n < size(pts); n += 1)
-            {
-                if (n == h)
-                    continue;
-                const a = min(h, n);
-                const b = max(h, n);
-                if (keepSet[a ~ "_" ~ b] != undefined)
-                    continue;
-                const mid = [(pts[h][0] + pts[n][0]) / 2, (pts[h][1] + pts[n][1]) / 2];
-                if (!inMaterial(poly, innerLoops, mid))
-                    continue;
-                cands = append(cands, [n, pointDistance(pts[h], pts[n])]);
-            }
-            cands = sortPairsByLength(cands);
-            var idx = 0;
-            while (deg[h] < 3 && idx < size(cands))
-            {
-                const n = cands[idx][0];
-                const a = min(h, n);
-                const b = max(h, n);
-                keepSet[a ~ "_" ~ b] = [a, b];
-                deg[h] += 1;
-                deg[n] += 1;
-                idx += 1;
-            }
-        }
-
-        // ----- 10. Cap: trim over-connected holes to "Max struts per hole" ----
-        // Removes each hole's LONGEST excess struts, but never its line-link
-        // and never drops another hole below 3. This merges the tiny clustered
-        // triangles into larger, more even pockets.
-        const cap = definition.maxStrutsPerHole;
-        var removed = {};
-        for (var h = 0; h < nHoleNodes; h += 1)
-        {
-            while (deg[h] > cap)
-            {
-                var bestN = -1;
-                var bestLen = -1;
-                for (var n = 0; n < size(pts); n += 1)
-                {
-                    if (n == h)
-                        continue;
-                    const a = min(h, n);
-                    const b = max(h, n);
-                    const key = a ~ "_" ~ b;
-                    if (keepSet[key] == undefined || removed[key] != undefined)
-                        continue;
-                    if (n < nHoleNodes && (nearestHole[h] == n || nearestHole[n] == h))
-                        continue;                       // keep the line-link
-                    if (n < nHoleNodes && deg[n] <= 3)
-                        continue;                       // keep neighbour's floor
-                    const L = pointDistance(pts[h], pts[n]);
-                    if (L > bestLen) { bestLen = L; bestN = n; }
-                }
-                if (bestN < 0)
-                    break;
-                const a = min(h, bestN);
-                const b = max(h, bestN);
-                removed[a ~ "_" ~ b] = true;
-                deg[h] -= 1;
-                deg[bestN] -= 1;
-            }
-        }
-
         var keptEdges = [];
         for (var key in keys(keepSet))
-        {
-            if (removed[key] == undefined)
-                keptEdges = append(keptEdges, keepSet[key]);
-        }
+            keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 11. Draw rib centerlines ---------------------------------------
+        // ----- 9. Draw rib centerlines ----------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
@@ -404,29 +344,35 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         if (definition.drawHoleCircles)
         {
-            for (var i = 0; i < nHoleNodes; i += 1)
+            for (var i = 0; i < nNodes; i += 1)
             {
-                skCircle(ribSketch, "holeRef" ~ i, {
-                            "center" : vector(holeNodes[i][0] * millimeter, holeNodes[i][1] * millimeter),
-                            "radius" : holeNodeRadii[i] * millimeter
-                        });
+                if (nodeIsHole[i])
+                {
+                    skCircle(ribSketch, "holeRef" ~ i, {
+                                "center" : vector(nodePts[i][0] * millimeter, nodePts[i][1] * millimeter),
+                                "radius" : nodeRadius[i] * millimeter
+                            });
+                }
             }
         }
         skSolve(ribSketch);
 
-        // ----- 12. Optional pocket profiles -----------------------------------
+        // ----- 10. Optional pocket profiles -----------------------------------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
             const halfW = (definition.ribWidth / millimeter) / 2;
             const bossExtra = definition.bossOffset / millimeter;
 
-            for (var i = 0; i < nHoleNodes; i += 1)
+            for (var i = 0; i < nNodes; i += 1)
             {
-                skCircle(pocketSketch, "boss" ~ i, {
-                            "center" : vector(holeNodes[i][0] * millimeter, holeNodes[i][1] * millimeter),
-                            "radius" : (holeNodeRadii[i] + bossExtra) * millimeter
-                        });
+                if (nodeIsHole[i])
+                {
+                    skCircle(pocketSketch, "boss" ~ i, {
+                                "center" : vector(nodePts[i][0] * millimeter, nodePts[i][1] * millimeter),
+                                "radius" : (nodeRadius[i] + bossExtra) * millimeter
+                            });
+                }
             }
 
             var ofs = 0;
@@ -465,27 +411,6 @@ function pointDistance(a is array, b is array) returns number
     return sqrt(dx * dx + dy * dy);
 }
 
-function sortPairsByLength(arr is array) returns array
-{
-    var a = arr;
-    for (var i = 0; i < size(a); i += 1)
-    {
-        var mi = i;
-        for (var j = i + 1; j < size(a); j += 1)
-        {
-            if (a[j][1] < a[mi][1])
-                mi = j;
-        }
-        if (mi != i)
-        {
-            const tmp = a[i];
-            a[i] = a[mi];
-            a[mi] = tmp;
-        }
-    }
-    return a;
-}
-
 function dedupePoints(pts is array, tol is number) returns array
 {
     var out = [];
@@ -522,7 +447,6 @@ function pointInPolygon(poly is array, p is array) returns boolean
     return inside;
 }
 
-// In solid material = inside the outer outline and outside every inner cutout.
 function inMaterial(outer is array, inners is array, p is array) returns boolean
 {
     if (!pointInPolygon(outer, p))
@@ -585,7 +509,6 @@ function polygonArea(poly is array) returns number
     return abs(a) / 2;
 }
 
-// Chain edge polylines end-to-end into closed loops (outer outline + slots).
 function buildLoops(polylines is array) returns array
 {
     const tol = 0.5;
