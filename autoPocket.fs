@@ -39,7 +39,9 @@ export const NONNEG_LENGTH_BOUNDS = {
             (inch)       : 0.0
         } as LengthBoundSpec;
 
-export const SAMPLE_BOUNDS = {
+// Named EDGE_SAMPLE_BOUNDS (not SAMPLE_BOUNDS) to avoid a clash with a
+// constant of that name already exported by the Onshape standard library.
+export const EDGE_SAMPLE_BOUNDS = {
             (unitless) : [0, 1, 10]
         } as IntegerBoundSpec;
 
@@ -64,7 +66,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (definition.includeBoundary)
         {
             annotation { "Name" : "Edge anchor points per side" }
-            isInteger(definition.boundarySamples, SAMPLE_BOUNDS);
+            isInteger(definition.boundarySamples, EDGE_SAMPLE_BOUNDS);
         }
 
         annotation { "Name" : "Limit rib length (0 = no limit)" }
