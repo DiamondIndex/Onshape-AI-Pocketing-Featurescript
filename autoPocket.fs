@@ -224,28 +224,43 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (definition.snapToHoles)
         {
             const snapMax = 1.3 * s;
-            for (var hi = 0; hi < size(dHolePts); hi += 1)
+            const dropDist = 0.7 * s;   // holes packed closer than this are NOT made vertices
+
+            // Process larger holes first so structural holes win over tiny pilot holes.
+            var order = [];
+            for (var i = 0; i < size(dHolePts); i += 1)
+                order = append(order, [i, dHoleRadii[i]]);
+            order = sortByValueDesc(order);
+
+            var keptHolePos = [];
+            for (var oi = 0; oi < size(order); oi += 1)
             {
+                const hi = order[oi][0];
+                const hp = dHolePts[hi];
+
+                var skip = false;
+                for (var kp in keptHolePos)
+                {
+                    if (pointDistance(hp, kp) < dropDist) { skip = true; break; }
+                }
+                if (skip)
+                    continue;       // too close to a kept hole -> stays a plain hole, keeps lattice even
+
                 var bestG = -1;
                 var bestD = snapMax;
                 for (var g = 0; g < size(gridPts); g += 1)
                 {
                     if (gridIsHole[g])
                         continue;
-                    const d = pointDistance(dHolePts[hi], gridPts[g]);
+                    const d = pointDistance(hp, gridPts[g]);
                     if (d < bestD) { bestD = d; bestG = g; }
                 }
                 if (bestG >= 0)
                 {
-                    gridPts[bestG] = dHolePts[hi];
+                    gridPts[bestG] = hp;
                     gridIsHole[bestG] = true;
                     gridRadius[bestG] = dHoleRadii[hi];
-                }
-                else
-                {
-                    gridPts = append(gridPts, dHolePts[hi]);
-                    gridIsHole = append(gridIsHole, true);
-                    gridRadius = append(gridRadius, dHoleRadii[hi]);
+                    keptHolePos = append(keptHolePos, hp);
                 }
             }
         }
@@ -409,6 +424,27 @@ function pointDistance(a is array, b is array) returns number
     const dx = a[0] - b[0];
     const dy = a[1] - b[1];
     return sqrt(dx * dx + dy * dy);
+}
+
+function sortByValueDesc(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+        {
+            if (a[j][1] > a[mi][1])
+                mi = j;
+        }
+        if (mi != i)
+        {
+            const tmp = a[i];
+            a[i] = a[mi];
+            a[mi] = tmp;
+        }
+    }
+    return a;
 }
 
 function dedupePoints(pts is array, tol is number) returns array
