@@ -4,11 +4,11 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 // AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
 // Lays a regular equilateral-triangle lattice over the plate and snaps the
-// nearest lattice node onto each (well-spaced) hole, so holes are vertices and
-// triangles stay uniform. Tight clusters of holes are collapsed into a single
-// SOLID boss (hatch-filled so the downstream cut keeps it solid), which avoids
-// tiny triangles and stops cluster holes from severing ribs. Non-circular
-// slots get a reinforced band.
+// nearest lattice node onto each well-spaced hole (holes become vertices,
+// triangles stay uniform). Holes packed closer than the triangle size are not
+// made vertices; instead a strut line is drawn THROUGH each such "floating"
+// hole to tie it into the network (so it is supported and the cut stays in one
+// piece). Non-circular slots get a reinforced band.
 
 // ===== Parameter bounds ====================================================
 
@@ -213,105 +213,78 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             row += 1;
         }
 
-        // ----- 5. Snap singles to the lattice; collapse clusters to bosses ----
+        // ----- 5. Snap well-spaced holes; collect the rest as "floating" ------
         var gridIsHole = [];
         var gridRadius = [];
-        var gridIsCluster = [];
         for (var i = 0; i < size(gridPts); i += 1)
         {
             gridIsHole = append(gridIsHole, false);
             gridRadius = append(gridRadius, 0);
-            gridIsCluster = append(gridIsCluster, false);
         }
+        var floatPts = [];
+        var floatRadii = [];
         if (definition.snapToHoles)
         {
-            const clusterDist = 0.6 * s;     // holes within this of each other form a cluster
             const snapMax = 1.3 * s;
+            const dropDist = 0.7 * s;
 
-            var cUsed = [];
+            var order = [];
             for (var i = 0; i < size(dHolePts); i += 1)
-                cUsed = append(cUsed, false);
-            var orderC = [];
-            for (var i = 0; i < size(dHolePts); i += 1)
-                orderC = append(orderC, [i, dHoleRadii[i]]);
-            orderC = sortByValueDesc(orderC);
+                order = append(order, [i, dHoleRadii[i]]);
+            order = sortByValueDesc(order);
 
-            for (var oi = 0; oi < size(orderC); oi += 1)
+            var keptHolePos = [];
+            for (var oi = 0; oi < size(order); oi += 1)
             {
-                const hi = orderC[oi][0];
-                if (cUsed[hi])
-                    continue;
-                var members = [hi];
-                cUsed[hi] = true;
-                for (var hj = 0; hj < size(dHolePts); hj += 1)
+                const hi = order[oi][0];
+                const hp = dHolePts[hi];
+
+                var skip = false;
+                for (var kp in keptHolePos)
                 {
-                    if (cUsed[hj])
-                        continue;
-                    if (pointDistance(dHolePts[hi], dHolePts[hj]) < clusterDist)
-                    {
-                        members = append(members, hj);
-                        cUsed[hj] = true;
-                    }
+                    if (pointDistance(hp, kp) < dropDist) { skip = true; break; }
+                }
+                if (skip)
+                {
+                    floatPts = append(floatPts, hp);
+                    floatRadii = append(floatRadii, dHoleRadii[hi]);
+                    continue;
                 }
 
-                if (size(members) == 1)
+                var bestG = -1;
+                var bestD = snapMax;
+                for (var g = 0; g < size(gridPts); g += 1)
                 {
-                    // Lone hole -> snap nearest free lattice node onto it (uniform).
-                    const hp = dHolePts[hi];
-                    var bestG = -1;
-                    var bestD = snapMax;
-                    for (var g = 0; g < size(gridPts); g += 1)
-                    {
-                        if (gridIsHole[g])
-                            continue;
-                        const d = pointDistance(hp, gridPts[g]);
-                        if (d < bestD) { bestD = d; bestG = g; }
-                    }
-                    if (bestG >= 0)
-                    {
-                        gridPts[bestG] = hp;
-                        gridIsHole[bestG] = true;
-                        gridRadius[bestG] = dHoleRadii[hi];
-                    }
+                    if (gridIsHole[g])
+                        continue;
+                    const d = pointDistance(hp, gridPts[g]);
+                    if (d < bestD) { bestD = d; bestG = g; }
+                }
+                if (bestG >= 0)
+                {
+                    gridPts[bestG] = hp;
+                    gridIsHole[bestG] = true;
+                    gridRadius[bestG] = dHoleRadii[hi];
+                    keptHolePos = append(keptHolePos, hp);
                 }
                 else
                 {
-                    // Cluster -> one solid boss vertex at the centroid.
-                    var cx = 0;
-                    var cy = 0;
-                    for (var m in members) { cx += dHolePts[m][0]; cy += dHolePts[m][1]; }
-                    cx = cx / size(members);
-                    cy = cy / size(members);
-                    var R = 0;
-                    for (var m in members)
-                    {
-                        const rr = pointDistance([cx, cy], dHolePts[m]) + dHoleRadii[m];
-                        if (rr > R) R = rr;
-                    }
-                    R = R + 0.12 * s;
-                    gridPts = append(gridPts, [cx, cy]);
-                    gridIsHole = append(gridIsHole, true);
-                    gridRadius = append(gridRadius, R);
-                    gridIsCluster = append(gridIsCluster, true);
+                    floatPts = append(floatPts, hp);
+                    floatRadii = append(floatRadii, dHoleRadii[hi]);
                 }
             }
         }
 
-        // ----- 6. Drop free lattice nodes inside a hole/boss clearance --------
-        var holeInfo = [];
+        // ----- 6. Drop free lattice nodes too close to a snapped hole ---------
+        var holePos = [];
         for (var g = 0; g < size(gridPts); g += 1)
-        {
             if (gridIsHole[g])
-            {
-                const clr = gridIsCluster[g] ? (gridRadius[g] + 0.2 * s) : (0.45 * s);
-                holeInfo = append(holeInfo, [gridPts[g], clr]);
-            }
-        }
+                holePos = append(holePos, gridPts[g]);
+        const sliver = 0.45 * s;
 
         var nodePts = [];
         var nodeIsHole = [];
         var nodeRadius = [];
-        var nodeIsCluster = [];
         for (var g = 0; g < size(gridPts); g += 1)
         {
             if (gridIsHole[g])
@@ -319,21 +292,19 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 nodePts = append(nodePts, gridPts[g]);
                 nodeIsHole = append(nodeIsHole, true);
                 nodeRadius = append(nodeRadius, gridRadius[g]);
-                nodeIsCluster = append(nodeIsCluster, gridIsCluster[g]);
             }
             else
             {
                 var tooClose = false;
-                for (var hinf in holeInfo)
+                for (var hp in holePos)
                 {
-                    if (pointDistance(gridPts[g], hinf[0]) < hinf[1]) { tooClose = true; break; }
+                    if (pointDistance(gridPts[g], hp) < sliver) { tooClose = true; break; }
                 }
                 if (!tooClose)
                 {
                     nodePts = append(nodePts, gridPts[g]);
                     nodeIsHole = append(nodeIsHole, false);
                     nodeRadius = append(nodeRadius, 0);
-                    nodeIsCluster = append(nodeIsCluster, false);
                 }
             }
         }
@@ -357,7 +328,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         // ----- 8. Triangulate, clipping to the material -----------------------
         const triangles = bowyerWatson(pts);
-        const maxEdge = 2.2 * s;
+        const maxEdge = 1.9 * s;
         var keepSet = {};
         for (var tri in triangles)
         {
@@ -381,13 +352,53 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 9. Draw rib centerlines + solid hatch-fill for cluster bosses --
+        // ----- 9. Tie each floating hole into the net with a line through it --
+        // n1 = nearest existing vertex; n2 = nearest vertex on the far side, so
+        // the strut n1 - float - n2 passes straight through the hole.
+        const drawPts = concatenateArrays([pts, floatPts]);
+        for (var f = 0; f < size(floatPts); f += 1)
+        {
+            const fp = floatPts[f];
+            const fi = size(pts) + f;
+
+            var n1 = -1;
+            var d1 = 1e18;
+            for (var k = 0; k < size(pts); k += 1)
+            {
+                const d = pointDistance(fp, pts[k]);
+                if (d < d1) { d1 = d; n1 = k; }
+            }
+            if (n1 < 0)
+                continue;
+            keptEdges = keepEdge(keptEdges, fi, n1);
+
+            const v1x = pts[n1][0] - fp[0];
+            const v1y = pts[n1][1] - fp[1];
+            var n2 = -1;
+            var d2 = 1e18;
+            for (var k = 0; k < size(pts); k += 1)
+            {
+                if (k == n1)
+                    continue;
+                const wx = pts[k][0] - fp[0];
+                const wy = pts[k][1] - fp[1];
+                if (v1x * wx + v1y * wy < 0)   // opposite side of the hole
+                {
+                    const d = pointDistance(fp, pts[k]);
+                    if (d < d2) { d2 = d; n2 = k; }
+                }
+            }
+            if (n2 >= 0)
+                keptEdges = keepEdge(keptEdges, fi, n2);
+        }
+
+        // ----- 10. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
         {
-            const pa = pts[e[0]];
-            const pb = pts[e[1]];
+            const pa = drawPts[e[0]];
+            const pb = drawPts[e[1]];
             skLineSegment(ribSketch, "rib" ~ ribIndex, {
                         "start" : vector(pa[0] * millimeter, pa[1] * millimeter),
                         "end"   : vector(pb[0] * millimeter, pb[1] * millimeter)
@@ -395,37 +406,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             ribIndex += 1;
         }
 
-        // Hatch the cluster bosses so the downstream cut keeps them solid.
-        const hatchStep = max(2.0, 0.1 * s);
-        var hatchIdx = 0;
-        for (var i = 0; i < nNodes; i += 1)
-        {
-            if (!nodeIsCluster[i])
-                continue;
-            const cx = nodePts[i][0];
-            const cy = nodePts[i][1];
-            const R = nodeRadius[i];
-            var hy = cy - R;
-            while (hy <= cy + R)
-            {
-                const halfw = sqrt(max(0, R * R - (hy - cy) * (hy - cy)));
-                if (halfw > 0.5 && inMaterial(poly, innerLoops, [cx, hy]))
-                {
-                    skLineSegment(ribSketch, "fill" ~ hatchIdx, {
-                                "start" : vector((cx - halfw) * millimeter, hy * millimeter),
-                                "end"   : vector((cx + halfw) * millimeter, hy * millimeter)
-                            });
-                    hatchIdx += 1;
-                }
-                hy += hatchStep;
-            }
-        }
-
         if (definition.drawHoleCircles)
         {
             for (var i = 0; i < nNodes; i += 1)
             {
-                if (nodeIsHole[i] && !nodeIsCluster[i])
+                if (nodeIsHole[i])
                 {
                     skCircle(ribSketch, "holeRef" ~ i, {
                                 "center" : vector(nodePts[i][0] * millimeter, nodePts[i][1] * millimeter),
@@ -436,7 +421,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         skSolve(ribSketch);
 
-        // ----- 10. Optional pocket profiles -----------------------------------
+        // ----- 11. Optional pocket profiles -----------------------------------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
@@ -453,12 +438,19 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                             });
                 }
             }
+            for (var f = 0; f < size(floatPts); f += 1)
+            {
+                skCircle(pocketSketch, "fboss" ~ f, {
+                            "center" : vector(floatPts[f][0] * millimeter, floatPts[f][1] * millimeter),
+                            "radius" : (floatRadii[f] + bossExtra) * millimeter
+                        });
+            }
 
             var ofs = 0;
             for (var e in keptEdges)
             {
-                const pa = pts[e[0]];
-                const pb = pts[e[1]];
+                const pa = drawPts[e[0]];
+                const pb = drawPts[e[1]];
                 const dx = pb[0] - pa[0];
                 const dy = pb[1] - pa[1];
                 const len = sqrt(dx * dx + dy * dy);
@@ -478,10 +470,17 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             skSolve(pocketSketch);
         }
 
-        reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ round(s) ~ " mm triangle side length.");
+        reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ size(floatPts) ~ " floating holes linked.");
     });
 
 // ===== Helper functions ====================================================
+
+function keepEdge(edges is array, a is number, b is number) returns array
+{
+    const aa = min(a, b);
+    const bb = max(a, b);
+    return append(edges, [aa, bb]);
+}
 
 function pointDistance(a is array, b is array) returns number
 {
