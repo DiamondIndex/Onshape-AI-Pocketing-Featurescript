@@ -54,6 +54,11 @@ export const NONNEG_LENGTH_BOUNDS = {
             (inch)       : 0.0
         } as LengthBoundSpec;
 
+export const ANGLE_BOUNDS = {
+            (degree) : [0.0, 30.0, 90.0],
+            (radian) : 0.5235987755982988
+        } as AngleBoundSpec;
+
 // ===== Feature =============================================================
 
 annotation { "Feature Type Name" : "Auto Pocket",
@@ -68,6 +73,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Triangle side length" }
         isLength(definition.cellSize, CELL_BOUNDS);
+
+        annotation { "Name" : "Minimum angle between ribs" }
+        isAngle(definition.minAngle, ANGLE_BOUNDS);
 
         annotation { "Name" : "Margin from plate edge" }
         isLength(definition.edgeMargin, MARGIN_BOUNDS);
@@ -420,6 +428,55 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             sumx[b] += -dxab / L; sumy[b] += -dyab / L;
         }
 
+        // Prune the sharper of any two ribs that meet closer than the min angle.
+        const minAngleRad = definition.minAngle / radian;
+        var pruned = {};
+        for (var v = 0; v < totalDraw; v += 1)
+        {
+            var inc = [];
+            for (var key in keys(keepSet))
+            {
+                if (pruned[key] != undefined)
+                    continue;
+                const e = keepSet[key];
+                var other = -1;
+                if (e[0] == v)
+                    other = e[1];
+                else if (e[1] == v)
+                    other = e[0];
+                else
+                    continue;
+                const dx = drawPts[other][0] - drawPts[v][0];
+                const dy = drawPts[other][1] - drawPts[v][1];
+                const len = sqrt(dx * dx + dy * dy);
+                if (len < 0.001)
+                    continue;
+                inc = append(inc, [other, atan2(dy, dx) / radian, len, key, dx / len, dy / len]);
+            }
+            if (size(inc) < 2)
+                continue;
+            inc = sortByAngleAsc(inc);
+            for (var i = 0; i < size(inc); i += 1)
+            {
+                const j = (i + 1) % size(inc);
+                if (pruned[inc[i][3]] != undefined || pruned[inc[j][3]] != undefined)
+                    continue;
+                var gap = inc[j][1] - inc[i][1];
+                if (j == 0)
+                    gap = gap + 2 * PI;
+                if (gap >= minAngleRad)
+                    continue;
+                const rm = (inc[i][2] >= inc[j][2]) ? inc[i] : inc[j];     // drop the longer rib
+                const rmOther = rm[0];
+                if (deg[v] - 1 < 2 || deg[rmOther] - 1 < 2)
+                    continue;                                              // keep the network connected
+                pruned[rm[3]] = true;
+                deg[v] -= 1; deg[rmOther] -= 1;
+                sumx[v] -= rm[4]; sumy[v] -= rm[5];
+                sumx[rmOther] += rm[4]; sumy[rmOther] += rm[5];
+            }
+        }
+
         var holeIdx = [];
         for (var i = 0; i < nNodes; i += 1)
             if (nodeIsHole[i])
@@ -469,7 +526,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         var keptEdges = [];
         for (var key in keys(keepSet))
-            keptEdges = append(keptEdges, keepSet[key]);
+            if (pruned[key] == undefined)
+                keptEdges = append(keptEdges, keepSet[key]);
 
         // ----- 10. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
@@ -571,6 +629,27 @@ function sortByValueDesc(arr is array) returns array
         for (var j = i + 1; j < size(a); j += 1)
         {
             if (a[j][1] > a[mi][1])
+                mi = j;
+        }
+        if (mi != i)
+        {
+            const tmp = a[i];
+            a[i] = a[mi];
+            a[mi] = tmp;
+        }
+    }
+    return a;
+}
+
+function sortByAngleAsc(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+        {
+            if (a[j][1] < a[mi][1])
                 mi = j;
         }
         if (mi != i)
