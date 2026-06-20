@@ -119,6 +119,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Snap lattice to holes", "Default" : true }
         definition.snapToHoles is boolean;
 
+        annotation { "Name" : "Force uniform triangles (test)" }
+        definition.forceTriangles is boolean;
+
         annotation { "Name" : "Draw reference circles at holes" }
         definition.drawHoleCircles is boolean;
 
@@ -710,6 +713,31 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         for (var key in keys(E))
             if (gone[key] == undefined)
                 keptEdges = append(keptEdges, E[key]);
+
+        // Test mode: force every pocket to a uniform triangle by using only the
+        // raw Delaunay triangulation (skips support struts, merges, reroutes).
+        if (definition.forceTriangles)
+        {
+            var triSet = {};
+            for (var tri in triangles)
+            {
+                const tE = [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]];
+                for (var e in tE)
+                {
+                    const a = min(e[0], e[1]);
+                    const b = max(e[0], e[1]);
+                    const pa = pts[a]; const pb = pts[b];
+                    const L = pointDistance(pa, pb);
+                    if (L < 0.001 || L > maxEdge) continue;
+                    const mid = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
+                    if (!inMaterial(poly, innerLoops, mid)) continue;
+                    triSet[a ~ "_" ~ b] = [a, b];
+                }
+            }
+            keptEdges = [];
+            for (var key in keys(triSet))
+                keptEdges = append(keptEdges, triSet[key]);
+        }
 
         // ----- 10. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
