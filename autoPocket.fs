@@ -282,6 +282,50 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 nodeIsHole = append(nodeIsHole, true);
                 nodeRadius = append(nodeRadius, dHoleRadii[hi]);
             }
+
+            // TUNING/LEARNING: where holes are sparse (e.g. the plate centre)
+            // a holes-only triangulation makes a few big triangles. To match the
+            // reference's EVEN pockets across the whole plate, fill the gaps with
+            // a background equilateral lattice: add grid points that are clear of
+            // every kept hole. Holes stay vertices; gaps get uniform Steiner points.
+            const rowH = s * sqrt(3) / 2;
+            var lbMinX = poly[0][0]; var lbMaxX = poly[0][0];
+            var lbMinY = poly[0][1]; var lbMaxY = poly[0][1];
+            for (var p in poly)
+            {
+                lbMinX = min(lbMinX, p[0]); lbMaxX = max(lbMaxX, p[0]);
+                lbMinY = min(lbMinY, p[1]); lbMaxY = max(lbMaxY, p[1]);
+            }
+            var lrow = 0;
+            var ly = lbMinY;
+            while (ly <= lbMaxY)
+            {
+                const lxoff = (lrow % 2 == 0) ? 0 : (s / 2);
+                var lx = lbMinX + lxoff;
+                while (lx <= lbMaxX)
+                {
+                    const lq = [lx, ly];
+                    if (inMaterial(poly, innerLoops, lq)
+                            && distToPolygon(poly, lq) >= marginMm
+                            && distToInners(innerLoops, lq) >= slotMarginMm)
+                    {
+                        var clear = true;
+                        for (var kp in keptHoles)
+                        {
+                            if (pointDistance(lq, kp) < 0.85 * s) { clear = false; break; }
+                        }
+                        if (clear)
+                        {
+                            nodePts = append(nodePts, lq);
+                            nodeIsHole = append(nodeIsHole, false);
+                            nodeRadius = append(nodeRadius, 0);
+                        }
+                    }
+                    lx += s;
+                }
+                ly += rowH;
+                lrow += 1;
+            }
         }
         else
         {
