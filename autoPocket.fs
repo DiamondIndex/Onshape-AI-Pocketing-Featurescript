@@ -116,6 +116,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Ignore holes smaller than (diameter)" }
         isLength(definition.minHoleDiameter, NONNEG_LENGTH_BOUNDS);
 
+        annotation { "Name" : "Triangulate holes directly (match plate)" }
+        definition.holesDirect is boolean;
+
         annotation { "Name" : "Snap lattice to holes", "Default" : true }
         definition.snapToHoles is boolean;
 
@@ -230,6 +233,28 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             if (!dup) { dHolePts = append(dHolePts, holePts[i]); dHoleRadii = append(dHoleRadii, holeRadii[i]); }
         }
 
+        // ----- 4-6. Triangulation nodes ---------------------------------------
+        var nodePts = [];
+        var nodeIsHole = [];
+        var nodeRadius = [];
+        var floatPts = [];
+        var floatRadii = [];
+
+        if (definition.holesDirect)
+        {
+            // Match a hand-pocketed plate: the holes themselves ARE the rib
+            // vertices (no background lattice). Ribs run hole-to-hole.
+            for (var i = 0; i < size(dHolePts); i += 1)
+            {
+                if (!inMaterial(poly, innerLoops, dHolePts[i]))
+                    continue;
+                nodePts = append(nodePts, dHolePts[i]);
+                nodeIsHole = append(nodeIsHole, true);
+                nodeRadius = append(nodeRadius, dHoleRadii[i]);
+            }
+        }
+        else
+        {
         // ----- 4. Full regular equilateral lattice inside the material --------
         var bMinX = poly[0][0]; var bMaxX = poly[0][0];
         var bMinY = poly[0][1]; var bMaxY = poly[0][1];
@@ -268,8 +293,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             gridIsHole = append(gridIsHole, false);
             gridRadius = append(gridRadius, 0);
         }
-        var floatPts = [];
-        var floatRadii = [];
+        floatPts = [];
+        floatRadii = [];
         if (definition.snapToHoles && !definition.equalSize && !definition.equilateral)
         {
             const snapMax = 1.3 * s;
@@ -329,9 +354,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 holePos = append(holePos, gridPts[g]);
         const sliver = 0.45 * s;
 
-        var nodePts = [];
-        var nodeIsHole = [];
-        var nodeRadius = [];
+        nodePts = [];
+        nodeIsHole = [];
+        nodeRadius = [];
         for (var g = 0; g < size(gridPts); g += 1)
         {
             if (gridIsHole[g])
@@ -354,6 +379,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     nodeRadius = append(nodeRadius, 0);
                 }
             }
+        }
         }
 
         // ----- 7. Sample the outer rim at ~s spacing --------------------------
