@@ -937,10 +937,16 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 opExtrude(context, id + "cutExtrude", {
                             "entities" : cutRegions,
                             "direction" : plane.normal,
-                            "endBound" : BoundingType.THROUGH_ALL,
-                            "hasSecondDirection" : true,
-                            "secondDirectionBound" : BoundingType.THROUGH_ALL,
-                            "operationType" : NewBodyOperationType.REMOVE
+                            "endBound" : BoundingType.BLIND,
+                            "endDepth" : 50 * millimeter,
+                            "startBound" : BoundingType.BLIND,
+                            "startDepth" : 50 * millimeter,
+                            "operationType" : NewBodyOperationType.NEW
+                        });
+                opBoolean(context, id + "cutBoolean", {
+                            "tools" : qCreatedBy(id + "cutExtrude", EntityType.BODY),
+                            "targets" : qOwnerBody(definition.face),
+                            "operationType" : BooleanOperationType.SUBTRACTION
                         });
             }
         }
