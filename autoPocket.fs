@@ -59,6 +59,27 @@ export const ANGLE_BOUNDS = {
             (radian) : 0.5235987755982988
         } as AngleBoundSpec;
 
+export const MERGE_BOUNDS = {
+            (meter)      : [0.0, 0.006, 0.1],
+            (centimeter) : 0.6,
+            (millimeter) : 6.0,
+            (inch)       : 0.25
+        } as LengthBoundSpec;
+
+export const RIB_EDGE_BOUNDS = {
+            (meter)      : [0.0, 0.005, 0.1],
+            (centimeter) : 0.5,
+            (millimeter) : 5.0,
+            (inch)       : 0.2
+        } as LengthBoundSpec;
+
+export const REROUTE_BOUNDS = {
+            (meter)      : [0.0, 0.03, 0.3],
+            (centimeter) : 3.0,
+            (millimeter) : 30.0,
+            (inch)       : 1.2
+        } as LengthBoundSpec;
+
 // ===== Feature =============================================================
 
 annotation { "Feature Type Name" : "Auto Pocket",
@@ -76,6 +97,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Minimum angle between ribs" }
         isAngle(definition.minAngle, ANGLE_BOUNDS);
+
+        annotation { "Name" : "Merge ribs closer than" }
+        isLength(definition.mergeDist, MERGE_BOUNDS);
+
+        annotation { "Name" : "Rib-to-edge margin" }
+        isLength(definition.ribEdgeMargin, RIB_EDGE_BOUNDS);
+
+        annotation { "Name" : "Reroute search radius" }
+        isLength(definition.rerouteRadius, REROUTE_BOUNDS);
 
         annotation { "Name" : "Margin from plate edge" }
         isLength(definition.edgeMargin, MARGIN_BOUNDS);
@@ -529,6 +559,158 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             if (pruned[key] == undefined)
                 keptEdges = append(keptEdges, keepSet[key]);
 
+        // ===== Geometric cleanup of the rib network ===========================
+        const mergeDistMm = definition.mergeDist / millimeter;
+        const ribEdgeMm = definition.ribEdgeMargin / millimeter;
+        const rerouteMm = definition.rerouteRadius / millimeter;
+
+        // Classify each node: "outer" (near plate boundary) and "hole".
+        var outerNode = [];
+        var holeNode = [];
+        for (var i = 0; i < totalDraw; i += 1)
+        {
+            outerNode = append(outerNode, distToPolygon(poly, drawPts[i]) <= ribEdgeMm);
+            var h = false;
+            if (i < nNodes) h = nodeIsHole[i];
+            else if (i >= size(pts)) h = true;        // floating holes live past pts
+            holeNode = append(holeNode, h);
+        }
+
+        // Working edge map + removed-set + live degree.
+        var E = {};
+        for (var e in keptEdges)
+            E[e[0] ~ "_" ~ e[1]] = [e[0], e[1]];
+        var gone = {};
+        var dg = [];
+        for (var i = 0; i < totalDraw; i += 1)
+            dg = append(dg, 0);
+        for (var key in keys(E)) { const e = E[key]; dg[e[0]] += 1; dg[e[1]] += 1; }
+
+        // Rule 3 + 4: drop edge-hugging ribs and outer-to-outer ribs.
+        for (var key in keys(E))
+        {
+            const e = E[key];
+            const a = e[0]; const b = e[1];
+            var drop = (outerNode[a] && outerNode[b]);            // rule 4
+            if (!drop)
+            {
+                var maxd = 0;
+                for (var sgmt = 0; sgmt <= 8; sgmt += 1)
+                {
+                    const t = sgmt / 8;
+                    const px = drawPts[a][0] + t * (drawPts[b][0] - drawPts[a][0]);
+                    const py = drawPts[a][1] + t * (drawPts[b][1] - drawPts[a][1]);
+                    const dd = distToPolygon(poly, [px, py]);
+                    if (dd > maxd) maxd = dd;
+                }
+                if (maxd <= ribEdgeMm) drop = true;               // rule 3 (whole rib hugs edge)
+            }
+            if (drop && dg[a] > 1 && dg[b] > 1)                   // keep every node connected
+            {
+                gone[key] = true;
+                dg[a] -= 1; dg[b] -= 1;
+            }
+        }
+
+        // Rule 2: merge near-parallel ribs that run very close (drop the shorter).
+        var ekeys = [];
+        for (var key in keys(E))
+            if (gone[key] == undefined) ekeys = append(ekeys, key);
+        for (var i = 0; i < size(ekeys); i += 1)
+        {
+            if (gone[ekeys[i]] != undefined) continue;
+            const e1 = E[ekeys[i]];
+            const a1 = drawPts[e1[0]]; const b1 = drawPts[e1[1]];
+            const l1 = pointDistance(a1, b1);
+            if (l1 < 0.001) continue;
+            const u1x = (b1[0] - a1[0]) / l1; const u1y = (b1[1] - a1[1]) / l1;
+            for (var j = i + 1; j < size(ekeys); j += 1)
+            {
+                if (gone[ekeys[j]] != undefined) continue;
+                const e2 = E[ekeys[j]];
+                if (e1[0] == e2[0] || e1[0] == e2[1] || e1[1] == e2[0] || e1[1] == e2[1]) continue;
+                const a2 = drawPts[e2[0]]; const b2 = drawPts[e2[1]];
+                const l2 = pointDistance(a2, b2);
+                if (l2 < 0.001) continue;
+                const u2x = (b2[0] - a2[0]) / l2; const u2y = (b2[1] - a2[1]) / l2;
+                if (abs(u1x * u2x + u1y * u2y) < 0.966) continue;          // not near-parallel (~15 deg)
+                if (segMinDist(a1, b1, a2, b2) > mergeDistMm) continue;    // not close
+                const rmk = (l1 >= l2) ? ekeys[j] : ekeys[i];             // drop the shorter
+                const rme = E[rmk];
+                if (dg[rme[0]] > 1 && dg[rme[1]] > 1)
+                {
+                    gone[rmk] = true;
+                    dg[rme[0]] -= 1; dg[rme[1]] -= 1;
+                    if (rmk == ekeys[i]) break;
+                }
+            }
+        }
+
+        // Rule 1: resolve rib-on-rib crossings -> reroute longer rib to nearest
+        // valid node (holes first), else drop it. Iterate until clean or capped.
+        var crossPass = 0;
+        var keepFixing = true;
+        while (keepFixing && crossPass < 8)
+        {
+            keepFixing = false;
+            crossPass += 1;
+            var live = [];
+            for (var key in keys(E))
+                if (gone[key] == undefined) live = append(live, [E[key][0], E[key][1], key]);
+            for (var i = 0; i < size(live); i += 1)
+            {
+                if (keepFixing) break;
+                for (var j = i + 1; j < size(live); j += 1)
+                {
+                    const e1 = live[i]; const e2 = live[j];
+                    if (e1[0] == e2[0] || e1[0] == e2[1] || e1[1] == e2[0] || e1[1] == e2[1]) continue;
+                    if (!segmentsCross(drawPts[e1[0]], drawPts[e1[1]], drawPts[e2[0]], drawPts[e2[1]])) continue;
+                    const len1 = pointDistance(drawPts[e1[0]], drawPts[e1[1]]);
+                    const len2 = pointDistance(drawPts[e2[0]], drawPts[e2[1]]);
+                    const rr = (len1 >= len2) ? e1 : e2;
+                    const keepEnd = rr[0];
+                    const oldKey = rr[2];
+                    var bestT = -1;
+                    var bestD = rerouteMm;
+                    for (var phase = 0; phase < 2; phase += 1)        // 0: holes only, 1: any node
+                    {
+                        for (var k = 0; k < totalDraw; k += 1)
+                        {
+                            if (k == keepEnd) continue;
+                            if (phase == 0 && !holeNode[k]) continue;
+                            const ck = min(keepEnd, k) ~ "_" ~ max(keepEnd, k);
+                            if (E[ck] != undefined && gone[ck] == undefined) continue;
+                            const dcand = pointDistance(drawPts[keepEnd], drawPts[k]);
+                            if (dcand >= bestD || dcand < 0.001) continue;
+                            const midc = [(drawPts[keepEnd][0] + drawPts[k][0]) / 2, (drawPts[keepEnd][1] + drawPts[k][1]) / 2];
+                            if (!inMaterial(poly, innerLoops, midc)) continue;
+                            var crosses = false;
+                            for (var m = 0; m < size(live); m += 1)
+                            {
+                                const le = live[m];
+                                if (le[2] == oldKey) continue;
+                                if (le[0] == keepEnd || le[1] == keepEnd || le[0] == k || le[1] == k) continue;
+                                if (segmentsCross(drawPts[keepEnd], drawPts[k], drawPts[le[0]], drawPts[le[1]])) { crosses = true; break; }
+                            }
+                            if (crosses) continue;
+                            bestD = dcand; bestT = k;
+                        }
+                        if (bestT >= 0) break;
+                    }
+                    gone[oldKey] = true;
+                    if (bestT >= 0)
+                        E[min(keepEnd, bestT) ~ "_" ~ max(keepEnd, bestT)] = [min(keepEnd, bestT), max(keepEnd, bestT)];
+                    keepFixing = true;
+                    break;
+                }
+            }
+        }
+
+        keptEdges = [];
+        for (var key in keys(E))
+            if (gone[key] == undefined)
+                keptEdges = append(keptEdges, E[key]);
+
         // ----- 10. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
@@ -745,6 +927,30 @@ function distToInners(inners is array, p is array) returns number
     for (var inr in inners)
         best = min(best, distToPolygon(inr, p));
     return best;
+}
+
+function ccw2(a is array, b is array, c is array) returns number
+{
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+// Strict 2D segment crossing; shared endpoints (collinear touch) do not count.
+function segmentsCross(p1 is array, p2 is array, p3 is array, p4 is array) returns boolean
+{
+    const d1 = ccw2(p3, p4, p1);
+    const d2 = ccw2(p3, p4, p2);
+    const d3 = ccw2(p1, p2, p3);
+    const d4 = ccw2(p1, p2, p4);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+           ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+function segMinDist(a is array, b is array, c is array, d is array) returns number
+{
+    if (segmentsCross(a, b, c, d))
+        return 0;
+    return min(min(distPointToSegment(a, c, d), distPointToSegment(b, c, d)),
+               min(distPointToSegment(c, a, b), distPointToSegment(d, a, b)));
 }
 
 function polygonArea(poly is array) returns number
