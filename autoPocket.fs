@@ -931,12 +931,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 pcount += 1;
             }
             skSolve(cutSketch);
-            if (pcount > 0)
+            const cutRegions = qSketchRegion(id ~ "pocketcut");
+            if (pcount > 0 && size(evaluateQuery(context, cutRegions)) > 0)
             {
                 opExtrude(context, id ~ "cutExtrude", {
-                            "entities" : qSketchRegion(id ~ "pocketcut", false),
-                            "direction" : plane.normal * (-1),
+                            "entities" : cutRegions,
+                            "direction" : plane.normal,
                             "endBound" : BoundingType.THROUGH_ALL,
+                            "hasSecondDirection" : true,
+                            "secondDirectionBound" : BoundingType.THROUGH_ALL,
                             "operationType" : NewBodyOperationType.REMOVE
                         });
             }
