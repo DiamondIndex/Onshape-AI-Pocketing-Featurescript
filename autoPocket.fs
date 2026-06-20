@@ -84,6 +84,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Draw reference circles at holes" }
         definition.drawHoleCircles is boolean;
 
+        annotation { "Name" : "Material around holes" }
+        isLength(definition.bossOffset, BOSS_BOUNDS);
+
         annotation { "Name" : "Also generate pocket profiles to cut" }
         definition.generatePockets is boolean;
 
@@ -91,9 +94,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         {
             annotation { "Name" : "Rib width" }
             isLength(definition.ribWidth, RIB_WIDTH_BOUNDS);
-
-            annotation { "Name" : "Material ring around holes (boss)" }
-            isLength(definition.bossOffset, BOSS_BOUNDS);
         }
     }
     {
@@ -498,6 +498,27 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
             }
         }
+
+        // Solid land of material around every hole (kept by the downstream cut).
+        const bossExtra = definition.bossOffset / millimeter;
+        if (bossExtra > 0.001)
+        {
+            for (var i = 0; i < nNodes; i += 1)
+            {
+                if (nodeIsHole[i])
+                    skCircle(ribSketch, "land" ~ i, {
+                                "center" : vector(nodePts[i][0] * millimeter, nodePts[i][1] * millimeter),
+                                "radius" : (nodeRadius[i] + bossExtra) * millimeter
+                            });
+            }
+            for (var f = 0; f < size(floatPts); f += 1)
+            {
+                skCircle(ribSketch, "fland" ~ f, {
+                            "center" : vector(floatPts[f][0] * millimeter, floatPts[f][1] * millimeter),
+                            "radius" : (floatRadii[f] + bossExtra) * millimeter
+                        });
+            }
+        }
         skSolve(ribSketch);
 
         // ----- 11. Optional pocket profiles -----------------------------------
@@ -505,7 +526,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
             const halfW = (definition.ribWidth / millimeter) / 2;
-            const bossExtra = definition.bossOffset / millimeter;
 
             for (var i = 0; i < nNodes; i += 1)
             {
