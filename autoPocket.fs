@@ -431,7 +431,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         // ----- 8. Triangulate, clipping to the material -----------------------
         const triangles = bowyerWatson(pts);
-        const maxEdge = 1.9 * s;
+        const maxEdge = 2.8 * s;   // TUNING: span sparse hole regions for full-plate coverage (ribs crossing big holes are dropped by the in-material midpoint test)
         var keepSet = {};
         for (var tri in triangles)
         {
