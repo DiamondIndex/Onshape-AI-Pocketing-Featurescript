@@ -394,6 +394,79 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 keepSet[min(fi, n2) ~ "_" ~ max(fi, n2)] = [min(fi, n2), max(fi, n2)];
         }
 
+        // ----- 9b. Any hole with <= 2 struts gets a 3rd on its empty side -----
+        const totalDraw = size(drawPts);
+        var deg = [];
+        var sumx = [];
+        var sumy = [];
+        for (var i = 0; i < totalDraw; i += 1)
+        {
+            deg = append(deg, 0);
+            sumx = append(sumx, 0);
+            sumy = append(sumy, 0);
+        }
+        for (var key in keys(keepSet))
+        {
+            const e = keepSet[key];
+            const a = e[0];
+            const b = e[1];
+            const dxab = drawPts[b][0] - drawPts[a][0];
+            const dyab = drawPts[b][1] - drawPts[a][1];
+            const L = sqrt(dxab * dxab + dyab * dyab);
+            if (L < 0.001)
+                continue;
+            deg[a] += 1; deg[b] += 1;
+            sumx[a] += dxab / L; sumy[a] += dyab / L;       // unit strut directions
+            sumx[b] += -dxab / L; sumy[b] += -dyab / L;
+        }
+
+        var holeIdx = [];
+        for (var i = 0; i < nNodes; i += 1)
+            if (nodeIsHole[i])
+                holeIdx = append(holeIdx, i);
+        for (var f = 0; f < size(floatPts); f += 1)
+            holeIdx = append(holeIdx, size(pts) + f);
+
+        const reach = 1.6 * s;
+        for (var hidx in holeIdx)
+        {
+            if (deg[hidx] >= 3)
+                continue;
+            const hp = drawPts[hidx];
+            // empty side = opposite the resultant of existing struts
+            var ex = -sumx[hidx];
+            var ey = -sumy[hidx];
+            const emag = sqrt(ex * ex + ey * ey);
+            const useDir = emag > 0.1;
+            if (useDir) { ex = ex / emag; ey = ey / emag; }
+
+            var bn = -1;
+            var bd = reach;
+            for (var k = 0; k < totalDraw; k += 1)
+            {
+                if (k == hidx)
+                    continue;
+                const akey = min(hidx, k) ~ "_" ~ max(hidx, k);
+                if (keepSet[akey] != undefined)
+                    continue;
+                const wx = drawPts[k][0] - hp[0];
+                const wy = drawPts[k][1] - hp[1];
+                if (useDir && (ex * wx + ey * wy) <= 0)
+                    continue;               // only the empty side
+                const mid = [(hp[0] + drawPts[k][0]) / 2, (hp[1] + drawPts[k][1]) / 2];
+                if (!inMaterial(poly, innerLoops, mid))
+                    continue;
+                const d = sqrt(wx * wx + wy * wy);
+                if (d < bd) { bd = d; bn = k; }
+            }
+            if (bn >= 0)
+            {
+                keepSet[min(hidx, bn) ~ "_" ~ max(hidx, bn)] = [min(hidx, bn), max(hidx, bn)];
+                deg[hidx] += 1;
+                deg[bn] += 1;
+            }
+        }
+
         var keptEdges = [];
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
