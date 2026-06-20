@@ -729,6 +729,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     const pa = pts[a]; const pb = pts[b];
                     const L = pointDistance(pa, pb);
                     if (L < 0.001 || L > maxEdge) continue;
+                    if (outerNode[a] && outerNode[b]) continue;   // skip ribs lying on the plate edge
                     const mid = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
                     if (!inMaterial(poly, innerLoops, mid)) continue;
                     triSet[a ~ "_" ~ b] = [a, b];
