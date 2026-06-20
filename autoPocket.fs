@@ -932,17 +932,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
             skSolve(cutSketch);
             const cutRegions = qSketchRegion(id ~ "pocketcut");
-            if (pcount > 0 && size(evaluateQuery(context, cutRegions)) > 0)
-            {
-                opExtrude(context, id ~ "cutExtrude", {
-                            "entities" : cutRegions,
-                            "direction" : plane.normal,
-                            "endBound" : BoundingType.THROUGH_ALL,
-                            "hasSecondDirection" : true,
-                            "secondDirectionBound" : BoundingType.THROUGH_ALL,
-                            "operationType" : NewBodyOperationType.REMOVE
-                        });
-            }
+            const nReg = size(evaluateQuery(context, cutRegions));
+            throw regenError("DIAG pockets=" ~ pcount ~ " regions=" ~ nReg);
         }
 
         reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ size(floatPts) ~ " floating holes supported.");
