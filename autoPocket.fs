@@ -885,7 +885,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (definition.autoCut)
         {
             const d = (definition.ribWidth / millimeter) / 2;
-            const cutSketch = newSketchOnPlane(context, id ~ "pocketcut", { "sketchPlane" : plane });
+            const cutSketch = newSketchOnPlane(context, id + "pocketcut", { "sketchPlane" : plane });
             var pcount = 0;
             for (var tri in triangles)
             {
@@ -931,9 +931,18 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 pcount += 1;
             }
             skSolve(cutSketch);
-            const cutRegions = qSketchRegion(id ~ "pocketcut");
-            const nReg = size(evaluateQuery(context, cutRegions));
-            throw regenError("DIAG pockets=" ~ pcount ~ " regions=" ~ nReg);
+            const cutRegions = qSketchRegion(id + "pocketcut");
+            if (pcount > 0 && size(evaluateQuery(context, cutRegions)) > 0)
+            {
+                opExtrude(context, id + "cutExtrude", {
+                            "entities" : cutRegions,
+                            "direction" : plane.normal,
+                            "endBound" : BoundingType.THROUGH_ALL,
+                            "hasSecondDirection" : true,
+                            "secondDirectionBound" : BoundingType.THROUGH_ALL,
+                            "operationType" : NewBodyOperationType.REMOVE
+                        });
+            }
         }
 
         reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ size(floatPts) ~ " floating holes supported.");
