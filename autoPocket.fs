@@ -3,12 +3,12 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 
 // AutoPocket  -  Uniform triangular lightening for FTC / FRC plates
 //
-// Lays a regular equilateral-triangle lattice over the plate, then SNAPS the
-// nearest lattice node onto each hole so the hole becomes a regular grid
-// vertex. This keeps the triangulation uniform (~6 even triangles around every
-// node) while making every hole a strut vertex; the un-snapped lattice nodes
-// are the extra "strut intersection" vertices. Non-circular slots get a solid
-// reinforced band.
+// Lays a regular equilateral-triangle lattice over the plate and snaps the
+// nearest lattice node onto each well-spaced hole. Holes packed closer than the
+// triangle size are not made grid vertices; instead each such "floating" hole
+// is tied into the network with short support struts to its nearest neighbours
+// (chaining rows of holes and anchoring to nearby vertices). Non-circular slots
+// get a reinforced band.
 
 // ===== Parameter bounds ====================================================
 
@@ -213,7 +213,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             row += 1;
         }
 
-        // ----- 5. Snap the nearest free lattice node onto each hole -----------
+        // ----- 5. Snap well-spaced holes; collect the rest as "floating" ------
         var gridIsHole = [];
         var gridRadius = [];
         for (var i = 0; i < size(gridPts); i += 1)
@@ -221,12 +221,13 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             gridIsHole = append(gridIsHole, false);
             gridRadius = append(gridRadius, 0);
         }
+        var floatPts = [];
+        var floatRadii = [];
         if (definition.snapToHoles)
         {
             const snapMax = 1.3 * s;
-            const dropDist = 0.7 * s;   // holes packed closer than this are NOT made vertices
+            const dropDist = 0.7 * s;
 
-            // Process larger holes first so structural holes win over tiny pilot holes.
             var order = [];
             for (var i = 0; i < size(dHolePts); i += 1)
                 order = append(order, [i, dHoleRadii[i]]);
@@ -244,7 +245,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     if (pointDistance(hp, kp) < dropDist) { skip = true; break; }
                 }
                 if (skip)
-                    continue;       // too close to a kept hole -> stays a plain hole, keeps lattice even
+                {
+                    floatPts = append(floatPts, hp);
+                    floatRadii = append(floatRadii, dHoleRadii[hi]);
+                    continue;
+                }
 
                 var bestG = -1;
                 var bestD = snapMax;
@@ -262,11 +267,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     gridRadius[bestG] = dHoleRadii[hi];
                     keptHolePos = append(keptHolePos, hp);
                 }
+                else
+                {
+                    floatPts = append(floatPts, hp);
+                    floatRadii = append(floatRadii, dHoleRadii[hi]);
+                }
             }
         }
 
-        // ----- 6. Drop free lattice nodes that sit too close to a hole --------
-        // (prevents slivers next to a snapped hole; keeps triangles even).
+        // ----- 6. Drop free lattice nodes too close to a snapped hole ---------
         var holePos = [];
         for (var g = 0; g < size(gridPts); g += 1)
             if (gridIsHole[g])
@@ -317,7 +326,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (size(pts) < 3)
             throw regenError("Plate too small for this triangle size; reduce 'Triangle side length'.", ["cellSize"]);
 
-        // ----- 8. Triangulate, clipping to the material (all triangles) -------
+        // ----- 8. Triangulate, clipping to the material -----------------------
         const triangles = bowyerWatson(pts);
         const maxEdge = 1.9 * s;
         var keepSet = {};
@@ -339,17 +348,63 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 keepSet[a ~ "_" ~ b] = [a, b];
             }
         }
+
+        // ----- 9. Support struts for floating holes ---------------------------
+        // Each floating hole connects to its nearest neighbour(s) -- vertices OR
+        // other floating holes -- within a short range, so rows of holes chain
+        // together and anchor to the lattice (like hand-drawn support struts).
+        const drawPts = concatenateArrays([pts, floatPts]);
+        const maxConnect = 1.35 * s;
+        for (var f = 0; f < size(floatPts); f += 1)
+        {
+            const fi = size(pts) + f;
+            const fp = floatPts[f];
+
+            var n1 = -1;
+            var d1 = maxConnect;
+            for (var k = 0; k < size(drawPts); k += 1)
+            {
+                if (k == fi)
+                    continue;
+                const d = pointDistance(fp, drawPts[k]);
+                if (d < d1) { d1 = d; n1 = k; }
+            }
+            if (n1 < 0)
+                continue;
+            keepSet[min(fi, n1) ~ "_" ~ max(fi, n1)] = [min(fi, n1), max(fi, n1)];
+
+            // a second strut on the far side, so support comes from both sides
+            const v1x = drawPts[n1][0] - fp[0];
+            const v1y = drawPts[n1][1] - fp[1];
+            var n2 = -1;
+            var d2 = maxConnect;
+            for (var k = 0; k < size(drawPts); k += 1)
+            {
+                if (k == fi || k == n1)
+                    continue;
+                const wx = drawPts[k][0] - fp[0];
+                const wy = drawPts[k][1] - fp[1];
+                if (v1x * wx + v1y * wy < 0)
+                {
+                    const d = pointDistance(fp, drawPts[k]);
+                    if (d < d2) { d2 = d; n2 = k; }
+                }
+            }
+            if (n2 >= 0)
+                keepSet[min(fi, n2) ~ "_" ~ max(fi, n2)] = [min(fi, n2), max(fi, n2)];
+        }
+
         var keptEdges = [];
         for (var key in keys(keepSet))
             keptEdges = append(keptEdges, keepSet[key]);
 
-        // ----- 9. Draw rib centerlines ----------------------------------------
+        // ----- 10. Draw rib centerlines ---------------------------------------
         const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ribIndex = 0;
         for (var e in keptEdges)
         {
-            const pa = pts[e[0]];
-            const pb = pts[e[1]];
+            const pa = drawPts[e[0]];
+            const pb = drawPts[e[1]];
             skLineSegment(ribSketch, "rib" ~ ribIndex, {
                         "start" : vector(pa[0] * millimeter, pa[1] * millimeter),
                         "end"   : vector(pb[0] * millimeter, pb[1] * millimeter)
@@ -372,7 +427,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         skSolve(ribSketch);
 
-        // ----- 10. Optional pocket profiles -----------------------------------
+        // ----- 11. Optional pocket profiles -----------------------------------
         if (definition.generatePockets)
         {
             const pocketSketch = newSketchOnPlane(context, id + "pockets", { "sketchPlane" : plane });
@@ -389,12 +444,19 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                             });
                 }
             }
+            for (var f = 0; f < size(floatPts); f += 1)
+            {
+                skCircle(pocketSketch, "fboss" ~ f, {
+                            "center" : vector(floatPts[f][0] * millimeter, floatPts[f][1] * millimeter),
+                            "radius" : (floatRadii[f] + bossExtra) * millimeter
+                        });
+            }
 
             var ofs = 0;
             for (var e in keptEdges)
             {
-                const pa = pts[e[0]];
-                const pb = pts[e[1]];
+                const pa = drawPts[e[0]];
+                const pb = drawPts[e[1]];
                 const dx = pb[0] - pa[0];
                 const dy = pb[1] - pa[1];
                 const len = sqrt(dx * dx + dy * dy);
@@ -414,7 +476,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             skSolve(pocketSketch);
         }
 
-        reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ round(s) ~ " mm triangle side length.");
+        reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ size(floatPts) ~ " floating holes supported.");
     });
 
 // ===== Helper functions ====================================================
