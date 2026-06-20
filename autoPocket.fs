@@ -122,6 +122,12 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Force uniform triangles (test)" }
         definition.forceTriangles is boolean;
 
+        annotation { "Name" : "Force equal-size triangles (test)" }
+        definition.equalSize is boolean;
+
+        annotation { "Name" : "Force equilateral triangles (test)" }
+        definition.equilateral is boolean;
+
         annotation { "Name" : "Draw reference circles at holes" }
         definition.drawHoleCircles is boolean;
 
@@ -264,7 +270,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         var floatPts = [];
         var floatRadii = [];
-        if (definition.snapToHoles)
+        if (definition.snapToHoles && !definition.equalSize && !definition.equilateral)
         {
             const snapMax = 1.3 * s;
             const dropDist = 0.7 * s;
@@ -716,7 +722,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         // Test mode: force every pocket to a uniform triangle by using only the
         // raw Delaunay triangulation (skips support struts, merges, reroutes).
-        if (definition.forceTriangles)
+        if (definition.forceTriangles || definition.equalSize)
         {
             var triSet = {};
             for (var tri in triangles)
@@ -738,6 +744,27 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             keptEdges = [];
             for (var key in keys(triSet))
                 keptEdges = append(keptEdges, triSet[key]);
+        }
+
+        // Equilateral test: connect only exact grid-neighbour pairs (60 deg).
+        if (definition.equilateral)
+        {
+            var eqSet = {};
+            for (var i = 0; i < nNodes; i += 1)
+            {
+                for (var j = i + 1; j < nNodes; j += 1)
+                {
+                    const L = pointDistance(nodePts[i], nodePts[j]);
+                    if (L < 0.55 * s || L > 1.15 * s) continue;     // the 6 lattice neighbours (~s)
+                    if (outerNode[i] && outerNode[j]) continue;
+                    const mid = [(nodePts[i][0] + nodePts[j][0]) / 2, (nodePts[i][1] + nodePts[j][1]) / 2];
+                    if (!inMaterial(poly, innerLoops, mid)) continue;
+                    eqSet[i ~ "_" ~ j] = [i, j];
+                }
+            }
+            keptEdges = [];
+            for (var key in keys(eqSet))
+                keptEdges = append(keptEdges, eqSet[key]);
         }
 
         // ----- 10. Draw rib centerlines ---------------------------------------
