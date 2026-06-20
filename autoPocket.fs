@@ -140,10 +140,16 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Also generate pocket profiles to cut" }
         definition.generatePockets is boolean;
 
-        if (definition.generatePockets)
+        annotation { "Name" : "Cut pockets (rib walls + remove)" }
+        definition.autoCut is boolean;
+
+        if (definition.generatePockets || definition.autoCut)
         {
-            annotation { "Name" : "Rib width" }
+            annotation { "Name" : "Rib width / wall thickness" }
             isLength(definition.ribWidth, RIB_WIDTH_BOUNDS);
+
+            annotation { "Name" : "Pocket corner fillet" }
+            isLength(definition.pocketFillet, RIB_EDGE_BOUNDS);
         }
     }
     {
@@ -870,6 +876,70 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
             }
             skSolve(pocketSketch);
+        }
+
+        // ----- 11b. Auto-cut pockets (inset each triangle, remove) ------------
+        // Each in-material Delaunay triangle is a pocket. Insetting every edge by
+        // half the rib width leaves a full rib (wall) between neighbouring
+        // pockets; extrude-remove the insets through the plate.
+        if (definition.autoCut)
+        {
+            const d = (definition.ribWidth / millimeter) / 2;
+            const cutSketch = newSketchOnPlane(context, id ~ "pocketcut", { "sketchPlane" : plane });
+            var pcount = 0;
+            for (var tri in triangles)
+            {
+                const A = pts[tri[0]];
+                const B = pts[tri[1]];
+                const C = pts[tri[2]];
+                const eAB = pointDistance(A, B);
+                const eBC = pointDistance(B, C);
+                const eCA = pointDistance(C, A);
+                if (eAB > maxEdge || eBC > maxEdge || eCA > maxEdge)
+                    continue;
+                const mAB = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+                const mBC = [(B[0] + C[0]) / 2, (B[1] + C[1]) / 2];
+                const mCA = [(C[0] + A[0]) / 2, (C[1] + A[1]) / 2];
+                const cen = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+                if (!inMaterial(poly, innerLoops, cen)
+                        || !inMaterial(poly, innerLoops, mAB)
+                        || !inMaterial(poly, innerLoops, mBC)
+                        || !inMaterial(poly, innerLoops, mCA))
+                    continue;
+                const per = eAB + eBC + eCA;
+                if (per < 0.001)
+                    continue;
+                const Ix = (eBC * A[0] + eCA * B[0] + eAB * C[0]) / per;
+                const Iy = (eBC * A[1] + eCA * B[1] + eAB * C[1]) / per;
+                const area2 = abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1]));
+                const inrad = area2 / per;                  // = 2*area / perimeter
+                if (inrad <= d + 0.4)
+                    continue;                               // too small to leave a pocket
+                const f = 1 - d / inrad;
+                const V = [[Ix + (A[0] - Ix) * f, Iy + (A[1] - Iy) * f],
+                           [Ix + (B[0] - Ix) * f, Iy + (B[1] - Iy) * f],
+                           [Ix + (C[0] - Ix) * f, Iy + (C[1] - Iy) * f]];
+                for (var k = 0; k < 3; k += 1)
+                {
+                    const p1 = V[k];
+                    const p2 = V[(k + 1) % 3];
+                    skLineSegment(cutSketch, "pc" ~ pcount ~ "_" ~ k, {
+                                "start" : vector(p1[0] * millimeter, p1[1] * millimeter),
+                                "end"   : vector(p2[0] * millimeter, p2[1] * millimeter)
+                            });
+                }
+                pcount += 1;
+            }
+            skSolve(cutSketch);
+            if (pcount > 0)
+            {
+                opExtrude(context, id ~ "cutExtrude", {
+                            "entities" : qSketchRegion(id ~ "pocketcut", false),
+                            "direction" : plane.normal * (-1),
+                            "endBound" : BoundingType.THROUGH_ALL,
+                            "operationType" : NewBodyOperationType.REMOVE
+                        });
+            }
         }
 
         reportFeatureInfo(context, id, size(keptEdges) ~ " struts, " ~ size(floatPts) ~ " floating holes supported.");
