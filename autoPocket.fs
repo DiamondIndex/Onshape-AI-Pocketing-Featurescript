@@ -250,13 +250,37 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         {
             // Match a hand-pocketed plate: the holes themselves ARE the rib
             // vertices (no background lattice). Ribs run hole-to-hole.
+            //
+            // TUNING/LEARNING: a real plate has tight clusters of fastener holes
+            // (bolt rows, the ear) that must NOT each become a triangle vertex,
+            // or the triangulation shatters into slivers. So we decluster: take
+            // holes largest-first and keep one only if it is at least ~0.55*s
+            // from every hole already kept. This gives the clean, evenly spaced
+            // vertex set seen in the reference image while still covering the
+            // whole plate.
+            const dropDist = 0.55 * s;
+            var hOrder = [];
             for (var i = 0; i < size(dHolePts); i += 1)
+                hOrder = append(hOrder, [i, dHoleRadii[i]]);
+            hOrder = sortByValueDesc(hOrder);
+            var keptHoles = [];
+            for (var oi = 0; oi < size(hOrder); oi += 1)
             {
-                if (!inMaterial(poly, innerLoops, dHolePts[i]))
+                const hi = hOrder[oi][0];
+                const hp = dHolePts[hi];
+                if (!inMaterial(poly, innerLoops, hp))
                     continue;
-                nodePts = append(nodePts, dHolePts[i]);
+                var skip = false;
+                for (var kp in keptHoles)
+                {
+                    if (pointDistance(hp, kp) < dropDist) { skip = true; break; }
+                }
+                if (skip)
+                    continue;
+                keptHoles = append(keptHoles, hp);
+                nodePts = append(nodePts, hp);
                 nodeIsHole = append(nodeIsHole, true);
-                nodeRadius = append(nodeRadius, dHoleRadii[i]);
+                nodeRadius = append(nodeRadius, dHoleRadii[hi]);
             }
         }
         else
