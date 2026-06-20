@@ -119,6 +119,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Triangulate holes directly (match plate)" }
         definition.holesDirect is boolean;
 
+        annotation { "Name" : "Fill sparse gaps with lattice" }
+        definition.gapFill is boolean;
+
         annotation { "Name" : "Snap lattice to holes", "Default" : true }
         definition.snapToHoles is boolean;
 
@@ -283,11 +286,13 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 nodeRadius = append(nodeRadius, dHoleRadii[hi]);
             }
 
-            // TUNING/LEARNING: where holes are sparse (e.g. the plate centre)
-            // a holes-only triangulation makes a few big triangles. To match the
-            // reference's EVEN pockets across the whole plate, fill the gaps with
-            // a background equilateral lattice: add grid points that are clear of
-            // every kept hole. Holes stay vertices; gaps get uniform Steiner points.
+            // OPTIONAL gap fill (default OFF). LEARNING: the reference plate is a
+            // HOLE-TO-HOLE triangulation -- the vertices ARE the holes, giving
+            // coarse organic triangles. A background lattice fill turns it into a
+            // fine uniform mesh that does NOT look like the reference, so this is
+            // only enabled when explicitly requested.
+            if (definition.gapFill)
+            {
             const rowH = s * sqrt(3) / 2;
             var lbMinX = poly[0][0]; var lbMaxX = poly[0][0];
             var lbMinY = poly[0][1]; var lbMaxY = poly[0][1];
@@ -325,6 +330,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
                 ly += rowH;
                 lrow += 1;
+            }
             }
         }
         else
