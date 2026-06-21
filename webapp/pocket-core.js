@@ -273,6 +273,10 @@ function pcGenerate(plate, params) {
     var s = params.triangleSize;
     var minR = (params.minHoleDia || 0) / 2;
     var dropDist = params.declusterDist;
+    // For uniform (similar-area) triangles, vertices must be roughly one
+    // triangle apart everywhere. When "even spacing" is on, thin any holes
+    // packed closer than ~0.8*s so the hole vertices match the lattice spacing.
+    if (params.gapFill && dropDist < 0.8 * s) dropDist = 0.8 * s;
     var maxEdge = (params.maxEdgeFactor || 2.8) * s;
     var marginMm = params.edgeMargin || 6;
     var d = params.ribWidth / 2;
