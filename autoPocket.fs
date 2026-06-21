@@ -122,6 +122,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Fill sparse gaps with lattice" }
         definition.gapFill is boolean;
 
+        annotation { "Name" : "Min hole spacing (declustering)" }
+        isLength(definition.declusterDist, MERGE_BOUNDS);
+
         annotation { "Name" : "Snap lattice to holes", "Default" : true }
         definition.snapToHoles is boolean;
 
@@ -261,7 +264,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             // from every hole already kept. This gives the clean, evenly spaced
             // vertex set seen in the reference image while still covering the
             // whole plate.
-            const dropDist = 0.55 * s;
+            const dropDist = definition.declusterDist / millimeter;   // TUNING: only drop holes closer than this (keep the rest as vertices like the reference)
             var hOrder = [];
             for (var i = 0; i < size(dHolePts); i += 1)
                 hOrder = append(hOrder, [i, dHoleRadii[i]]);
