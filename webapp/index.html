@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Auto Pocket — Algorithm Playground</title>
+<style>
+  :root { --bg:#1e1f22; --panel:#2b2d31; --ink:#e6e6e6; --mut:#9aa0a6; --acc:#4c8bf5; --rib:#c8a24a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 system-ui,Segoe UI,Arial; background:var(--bg); color:var(--ink); display:flex; height:100vh; overflow:hidden; }
+  #side { width:300px; flex:0 0 300px; background:var(--panel); padding:12px 14px; overflow-y:auto; }
+  #main { flex:1; position:relative; }
+  canvas { display:block; width:100%; height:100%; background:#fff; }
+  h1 { font-size:14px; margin:0 0 10px; }
+  h2 { font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; margin:16px 0 6px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:7px 0; }
+  .row label { color:var(--mut); }
+  .row output { font-variant-numeric:tabular-nums; min-width:48px; text-align:right; }
+  input[type=range] { width:150px; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:7px 10px; cursor:pointer; font:inherit; width:100%; margin-top:6px; }
+  button.sec { background:#3a3d44; }
+  .file { margin:4px 0; }
+  #info { font-size:12px; color:var(--mut); margin-top:10px; white-space:pre-line; }
+  .chk { display:flex; align-items:center; gap:6px; margin:7px 0; }
+  #legend { position:absolute; bottom:10px; left:10px; background:rgba(0,0,0,.55); padding:6px 9px; border-radius:6px; font-size:11px; }
+  .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin-right:4px; }
+</style>
+</head>
+<body>
+  <div id="side">
+    <h1>Auto Pocket — Playground</h1>
+
+    <h2>Plate input</h2>
+    <div class="file"><label>DXF: <input type="file" id="dxf" accept=".dxf"></label></div>
+    <button class="sec" id="sample">Load sample plate</button>
+
+    <h2>Reference overlay</h2>
+    <div class="file"><label>Image: <input type="file" id="ref" accept="image/*"></label></div>
+    <div class="row"><label>Opacity</label><input type="range" id="refOp" min="0" max="100" value="45"><output id="refOpV">45</output></div>
+    <div class="row"><label>Scale</label><input type="range" id="refSc" min="50" max="150" value="100"><output id="refScV">100</output></div>
+    <div class="row"><label>X</label><input type="range" id="refX" min="-300" max="300" value="0"><output id="refXV">0</output></div>
+    <div class="row"><label>Y</label><input type="range" id="refY" min="-300" max="300" value="0"><output id="refYV">0</output></div>
+
+    <h2>Algorithm</h2>
+    <div class="row"><label>Triangle size</label><input type="range" id="s" min="10" max="60" step="0.5" value="30"><output id="sV"></output></div>
+    <div class="row"><label>Min hole Ø</label><input type="range" id="minR" min="0" max="15" step="0.5" value="2"><output id="minRV"></output></div>
+    <div class="row"><label>Decluster</label><input type="range" id="dc" min="0" max="40" step="0.5" value="6"><output id="dcV"></output></div>
+    <div class="row"><label>Max edge ×s</label><input type="range" id="me" min="1.4" max="4" step="0.1" value="2.8"><output id="meV"></output></div>
+    <div class="row"><label>Rib width</label><input type="range" id="rw" min="2" max="12" step="0.1" value="6"><output id="rwV"></output></div>
+    <div class="row"><label>Corner fillet</label><input type="range" id="fl" min="0" max="6" step="0.1" value="2"><output id="flV"></output></div>
+    <div class="row"><label>Edge margin</label><input type="range" id="em" min="0" max="15" step="0.5" value="6"><output id="emV"></output></div>
+    <div class="chk"><input type="checkbox" id="gf"><label for="gf">Fill sparse gaps (lattice)</label></div>
+
+    <h2>View</h2>
+    <div class="chk"><input type="checkbox" id="showRibs" checked><label for="showRibs">Rib centrelines</label></div>
+    <div class="chk"><input type="checkbox" id="showPockets" checked><label for="showPockets">Pockets (cut)</label></div>
+    <div class="chk"><input type="checkbox" id="showHoles" checked><label for="showHoles">Holes</label></div>
+
+    <button id="export">Generate FeatureScript params</button>
+    <div id="info"></div>
+  </div>
+
+  <div id="main">
+    <canvas id="cv"></canvas>
+    <div id="legend">
+      <span class="sw" style="background:#333"></span>material&nbsp;
+      <span class="sw" style="background:#cfe0ff"></span>pocket&nbsp;
+      <span class="sw" style="background:#c8a24a"></span>rib&nbsp;
+      <span class="sw" style="background:#e23"></span>hole
+    </div>
+  </div>
+
+<script src="pocket-core.js"></script>
+<script src="dxf.js"></script>
+<script>
+"use strict";
+var cv = document.getElementById("cv");
+var ctx = cv.getContext("2d");
+var plate = null;
+var refImg = null;
+var result = null;
+
+function P(id){ return document.getElementById(id); }
+var ctrls = ["s","minR","dc","me","rw","fl","em"];
+
+function params() {
+  return {
+    triangleSize: +P("s").value,
+    minHoleDia: +P("minR").value,
+    declusterDist: +P("dc").value,
+    maxEdgeFactor: +P("me").value,
+    ribWidth: +P("rw").value,
+    pocketFillet: +P("fl").value,
+    edgeMargin: +P("em").value,
+    gapFill: P("gf").checked
+  };
+}
+
+function syncLabels(){
+  P("sV").textContent = P("s").value;
+  P("minRV").textContent = P("minR").value;
+  P("dcV").textContent = P("dc").value;
+  P("meV").textContent = P("me").value;
+  P("rwV").textContent = P("rw").value;
+  P("flV").textContent = P("fl").value;
+  P("emV").textContent = P("em").value;
+  P("refOpV").textContent = P("refOp").value;
+  P("refScV").textContent = P("refSc").value;
+  P("refXV").textContent = P("refX").value;
+  P("refYV").textContent = P("refY").value;
+}
+
+// ---- world<->screen fit ----
+var T = { sc:1, ox:0, oy:0, H:0 };
+function fit(){
+  cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+  if (!plate || !plate.outline.length){ T.sc=1; T.ox=0; T.oy=0; return; }
+  var b = bboxOf(plate.outline);
+  var pad = 40;
+  var sx = (cv.width - 2*pad) / Math.max(1,(b.maxX-b.minX));
+  var sy = (cv.height - 2*pad) / Math.max(1,(b.maxY-b.minY));
+  T.sc = Math.min(sx, sy);
+  T.ox = pad - b.minX*T.sc + (cv.width-2*pad - (b.maxX-b.minX)*T.sc)/2;
+  T.oy = pad - b.minY*T.sc;
+  T.H = cv.height;
+}
+function bboxOf(poly){ var b={minX:poly[0][0],minY:poly[0][1],maxX:poly[0][0],maxY:poly[0][1]};
+  for(var i=1;i<poly.length;i++){ b.minX=Math.min(b.minX,poly[i][0]); b.minY=Math.min(b.minY,poly[i][1]); b.maxX=Math.max(b.maxX,poly[i][0]); b.maxY=Math.max(b.maxY,poly[i][1]); } return b; }
+function sx(x){ return x*T.sc + T.ox; }
+function sy(y){ return T.H - (y*T.sc + T.oy); } // flip Y (CAD up)
+
+function polyPath(poly){ ctx.beginPath(); ctx.moveTo(sx(poly[0][0]),sy(poly[0][1])); for(var i=1;i<poly.length;i++) ctx.lineTo(sx(poly[i][0]),sy(poly[i][1])); ctx.closePath(); }
+
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!plate){ return; }
+
+  // reference overlay (drawn first, under)
+  if(refImg){
+    var op = +P("refOp").value/100;
+    var scl = +P("refSc").value/100;
+    ctx.globalAlpha = op;
+    var iw = cv.width*scl, ih = cv.height*scl;
+    ctx.drawImage(refImg, (cv.width-iw)/2 + +P("refX").value, (cv.height-ih)/2 + +P("refY").value, iw, ih);
+    ctx.globalAlpha = 1;
+  }
+
+  // material fill
+  if(plate.outline.length){
+    polyPath(plate.outline);
+    ctx.fillStyle = "rgba(70,72,78,.92)";
+    ctx.fill("evenodd");
+    // punch inner cutouts visually
+    ctx.fillStyle = "#fff";
+    for(var k=0;k<plate.inners.length;k++){ polyPath(plate.inners[k]); ctx.fill(); }
+  }
+
+  // pockets (removed material)
+  if(result && P("showPockets").checked){
+    ctx.fillStyle = "#cfe0ff";
+    for(var i=0;i<result.pockets.length;i++){ polyPath(result.pockets[i]); ctx.fill(); }
+  }
+
+  // holes
+  if(P("showHoles").checked){
+    ctx.fillStyle = "#fff"; ctx.strokeStyle="#e23"; ctx.lineWidth=1;
+    for(var h=0;h<plate.holes.length;h++){
+      var hh=plate.holes[h];
+      ctx.beginPath(); ctx.arc(sx(hh.x),sy(hh.y),Math.max(1,hh.r*T.sc),0,7); ctx.fill(); ctx.stroke();
+    }
+  }
+
+  // rib centrelines
+  if(result && P("showRibs").checked){
+    ctx.strokeStyle = "#c8a24a"; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for(var e=0;e<result.edges.length;e++){
+      var a=result.vertices[result.edges[e][0]], b=result.vertices[result.edges[e][1]];
+      ctx.moveTo(sx(a[0]),sy(a[1])); ctx.lineTo(sx(b[0]),sy(b[1]));
+    }
+    ctx.stroke();
+    // vertices
+    ctx.fillStyle="#7a5";
+    for(var v=0;v<result.nNodes;v++){ var pv=result.vertices[v]; ctx.beginPath(); ctx.arc(sx(pv[0]),sy(pv[1]),1.6,0,7); ctx.fill(); }
+  }
+
+  // outline stroke
+  if(plate.outline.length){ polyPath(plate.outline); ctx.strokeStyle="#111"; ctx.lineWidth=1.5; ctx.stroke(); }
+}
+
+function run(){
+  syncLabels();
+  if(!plate){ draw(); return; }
+  try {
+    var t0 = performance.now();
+    result = pcGenerate(plate, params());
+    var t1 = performance.now();
+    P("info").textContent =
+      "holes (input): "+plate.holes.length+"\n"+
+      "vertices used: "+result.info.holesUsed+"\n"+
+      "ribs: "+result.info.ribs+"\n"+
+      "pockets: "+result.info.pockets+"\n"+
+      "compute: "+(t1-t0).toFixed(1)+" ms";
+  } catch(err){ P("info").textContent = "ERROR: "+err.message; result=null; }
+  draw();
+}
+
+// ---- sample plate ----
+function loadSample(){
+  var w=420, h=240;
+  var outline=[[0,0],[w,0],[w,h],[120,h],[80,h+40],[0,h+40]]; // rough plate w/ an ear
+  var holes=[];
+  // scatter holes on a loose grid + a few big lightening holes
+  for(var gx=40; gx<w-20; gx+=55){
+    for(var gy=35; gy<h-10; gy+=50){
+      var jx=(Math.sin(gx*1.7+gy)*8), jy=(Math.cos(gy*1.3+gx)*8);
+      holes.push({x:gx+jx, y:gy+jy, r:3});
+    }
+  }
+  holes.push({x:90,y:60,r:16}); holes.push({x:w-70,y:h-60,r:20}); holes.push({x:w-70,y:60,r:14});
+  plate={outline:outline, inners:[], holes:holes, bbox:bboxOf(outline)};
+  fit(); run();
+}
+
+// ---- wiring ----
+ctrls.forEach(function(id){ P(id).addEventListener("input", run); });
+["gf","showRibs","showPockets","showHoles"].forEach(function(id){ P(id).addEventListener("change", run); });
+["refOp","refSc","refX","refY"].forEach(function(id){ P(id).addEventListener("input", function(){ syncLabels(); draw(); }); });
+
+P("dxf").addEventListener("change", function(e){
+  var f=e.target.files[0]; if(!f) return;
+  var rd=new FileReader();
+  rd.onload=function(){
+    try{
+      var parsed=dxfParse(rd.result);
+      plate={outline:parsed.outline, inners:parsed.inners, holes:parsed.holes, bbox:parsed.bbox};
+      if(parsed.warnings.length) alert("DXF notes:\n"+parsed.warnings.join("\n"));
+      fit(); run();
+    }catch(err){ alert("DXF parse error: "+err.message); }
+  };
+  rd.readAsText(f);
+});
+
+P("ref").addEventListener("change", function(e){
+  var f=e.target.files[0]; if(!f) return;
+  var url=URL.createObjectURL(f);
+  refImg=new Image(); refImg.onload=function(){ draw(); }; refImg.src=url;
+});
+
+P("sample").addEventListener("click", loadSample);
+
+P("export").addEventListener("click", function(){
+  var p=params();
+  var txt =
+    "// Tuned Auto Pocket parameters (set these in the FeatureScript):\n"+
+    "Triangle side length      : "+p.triangleSize+" mm\n"+
+    "Ignore holes smaller than : "+p.minHoleDia+" mm\n"+
+    "Min hole spacing          : "+p.declusterDist+" mm\n"+
+    "Max edge factor           : "+p.maxEdgeFactor+" (maxEdge = x * size)\n"+
+    "Rib width / wall          : "+p.ribWidth+" mm\n"+
+    "Pocket corner fillet      : "+p.pocketFillet+" mm\n"+
+    "Margin from edge          : "+p.edgeMargin+" mm\n"+
+    "Fill sparse gaps          : "+p.gapFill+"\n";
+  navigator.clipboard && navigator.clipboard.writeText(txt);
+  alert(txt+"\n(copied to clipboard)");
+});
+
+window.addEventListener("resize", function(){ fit(); draw(); });
+
+syncLabels();
+loadSample();
+</script>
+</body>
+</html>

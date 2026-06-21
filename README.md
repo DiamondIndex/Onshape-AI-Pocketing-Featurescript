@@ -9,6 +9,13 @@ This automates the tedious manual step of drawing rib lines between stress
 points for weight savings while keeping the structure strong and visually
 balanced.
 
+## Web app (algorithm playground)
+
+A browser-based playground for developing and tuning the pocketing algorithm with
+an instant render loop (no Onshape deploy cycle), then porting it to this
+FeatureScript, lives in its own section: [`webapp/`](webapp/) — see
+[`webapp/README.md`](webapp/README.md).
+
 ## How it works
 
 1. **Select a planar face.** The feature reads every through-hole on it
