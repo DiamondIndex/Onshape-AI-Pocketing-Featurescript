@@ -281,6 +281,7 @@ function pcGenerate(plate, params) {
     var marginMm = params.edgeMargin || 6;
     var d = params.ribWidth / 2;
     var R = params.pocketFillet || 0;
+    var holeMargin = params.holeMargin || 0;   // solid material kept around EVERY hole edge
 
     var poly = plate.outline;
     var inners = plate.inners || [];
@@ -305,6 +306,12 @@ function pcGenerate(plate, params) {
     var nodeIsHole = [];
     var nodeR = [];
     var kept = [];
+    var holeIsVertex = [];
+    for (var hv = 0; hv < holes.length; hv += 1) holeIsVertex.push(false);
+    // Holes are prioritised FIRST (added before any lattice fill) so the
+    // triangulation is anchored on real holes; declustering only thins holes
+    // that are packed closer than dropDist (those get a support strut later so
+    // they are still attached to the network).
     for (var oi = 0; oi < order.length; oi += 1) {
         var hi = order[oi][0];
         var hp = [holes[hi].x, holes[hi].y];
@@ -315,6 +322,7 @@ function pcGenerate(plate, params) {
         }
         if (skip) continue;
         kept.push(hp);
+        holeIsVertex[hi] = true;
         nodePts.push(hp); nodeIsHole.push(true); nodeR.push(holes[hi].r);
     }
 
@@ -389,6 +397,28 @@ function pcGenerate(plate, params) {
     var edges = [];
     for (var key in edgeSet) { if (edgeSet.hasOwnProperty(key)) edges.push(edgeSet[key]); }
 
+    // 5. material ring (boss) around EVERY hole of any size, kept BEFORE ribs.
+    var bosses = [];
+    for (var bi = 0; bi < holes.length; bi += 1) {
+        bosses.push({ x: holes[bi].x, y: holes[bi].y, r: holes[bi].r, R: holes[bi].r + holeMargin });
+    }
+
+    // 6. guarantee every hole is attached: any hole that did NOT become a
+    //    triangulation vertex (declustered) gets a support strut to the nearest
+    //    vertex, so its boss can never become a floating island of material.
+    var struts = [];
+    for (var si = 0; si < holes.length; si += 1) {
+        if (holeIsVertex[si]) continue;
+        var hpS = [holes[si].x, holes[si].y];
+        if (!pcInMaterial(poly, inners, hpS)) continue;
+        var best = -1, bestD = 1e18;
+        for (var vi = 0; vi < nNodes; vi += 1) {
+            var dd2 = pcDist(hpS, nodePts[vi]);
+            if (dd2 < bestD) { bestD = dd2; best = vi; }
+        }
+        if (best >= 0) struts.push([hpS, nodePts[best]]);
+    }
+
     return {
         vertices: pts,
         nNodes: nNodes,
@@ -397,7 +427,10 @@ function pcGenerate(plate, params) {
         edges: edges,
         triangles: keepTris,
         pockets: pockets,
-        info: { vertices: pts.length, holesUsed: nNodes, ribs: edges.length, pockets: pockets.length }
+        bosses: bosses,
+        struts: struts,
+        info: { vertices: pts.length, holes: holes.length, holesUsed: nNodes,
+                struts: struts.length, ribs: edges.length, pockets: pockets.length }
     };
 }
 

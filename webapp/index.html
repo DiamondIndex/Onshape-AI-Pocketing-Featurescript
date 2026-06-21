@@ -47,6 +47,7 @@
     <div class="row"><label>Max edge ×s</label><input type="range" id="me" min="1.4" max="4" step="0.1" value="2.8"><output id="meV"></output></div>
     <div class="row"><label>Rib width</label><input type="range" id="rw" min="2" max="12" step="0.1" value="6"><output id="rwV"></output></div>
     <div class="row"><label>Corner fillet</label><input type="range" id="fl" min="0" max="6" step="0.1" value="2"><output id="flV"></output></div>
+    <div class="row"><label>Hole material</label><input type="range" id="hm" min="0" max="15" step="0.5" value="3"><output id="hmV"></output></div>
     <div class="row"><label>Edge margin</label><input type="range" id="em" min="0" max="15" step="0.5" value="6"><output id="emV"></output></div>
     <div class="chk"><input type="checkbox" id="gf" checked><label for="gf">Even spacing (uniform areas)</label></div>
 
@@ -80,7 +81,7 @@ var refImg = null;
 var result = null;
 
 function P(id){ return document.getElementById(id); }
-var ctrls = ["s","minR","dc","me","rw","fl","em"];
+var ctrls = ["s","minR","dc","me","rw","fl","hm","em"];
 
 function params() {
   return {
@@ -90,6 +91,7 @@ function params() {
     maxEdgeFactor: +P("me").value,
     ribWidth: +P("rw").value,
     pocketFillet: +P("fl").value,
+    holeMargin: +P("hm").value,
     edgeMargin: +P("em").value,
     gapFill: P("gf").checked
   };
@@ -102,6 +104,7 @@ function syncLabels(){
   P("meV").textContent = P("me").value;
   P("rwV").textContent = P("rw").value;
   P("flV").textContent = P("fl").value;
+  P("hmV").textContent = P("hm").value;
   P("emV").textContent = P("em").value;
   P("refOpV").textContent = P("refOp").value;
   P("refScV").textContent = P("refSc").value;
@@ -112,7 +115,7 @@ function syncLabels(){
 // ---- world<->screen fit ----
 var T = { sc:1, ox:0, oy:0, H:0 };
 function fit(){
-  cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+  cv.width = cv.clientWidth || 900; cv.height = cv.clientHeight || 700;
   if (!plate || !plate.outline.length){ T.sc=1; T.ox=0; T.oy=0; return; }
   var b = bboxOf(plate.outline);
   var pad = 40;
@@ -160,6 +163,25 @@ function draw(){
     for(var i=0;i<result.pockets.length;i++){ polyPath(result.pockets[i]); ctx.fill(); }
   }
 
+  // material kept around holes (bosses) + attachment struts — drawn over the
+  // pockets in the material colour, so every hole has a solid ring and is tied
+  // to the rib network.
+  if(result){
+    var matCol = "#46484e";
+    ctx.strokeStyle = matCol; ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(1, +P("rw").value * T.sc);
+    for(var st=0; st<result.struts.length; st++){
+      var sa=result.struts[st][0], sb=result.struts[st][1];
+      ctx.beginPath(); ctx.moveTo(sx(sa[0]),sy(sa[1])); ctx.lineTo(sx(sb[0]),sy(sb[1])); ctx.stroke();
+    }
+    ctx.lineCap = "butt";
+    ctx.fillStyle = matCol;
+    for(var bo=0; bo<result.bosses.length; bo++){
+      var bs=result.bosses[bo];
+      ctx.beginPath(); ctx.arc(sx(bs.x),sy(bs.y),Math.max(1,bs.R*T.sc),0,7); ctx.fill();
+    }
+  }
+
   // holes
   if(P("showHoles").checked){
     ctx.fillStyle = "#fff"; ctx.strokeStyle="#e23"; ctx.lineWidth=1;
@@ -196,7 +218,9 @@ function run(){
     var t1 = performance.now();
     P("info").textContent =
       "holes (input): "+plate.holes.length+"\n"+
-      "vertices used: "+result.info.holesUsed+"\n"+
+      "holes kept: "+result.info.holes+"\n"+
+      "hole vertices: "+result.info.holesUsed+"\n"+
+      "support struts: "+result.info.struts+"\n"+
       "ribs: "+result.info.ribs+"\n"+
       "pockets: "+result.info.pockets+"\n"+
       "compute: "+(t1-t0).toFixed(1)+" ms";
