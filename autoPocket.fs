@@ -12,9 +12,9 @@ import(path : "onshape/std/geometry.fs", version : "2985.0");
 //   4. sample the outer rim so ribs reach the perimeter
 //   5. Delaunay triangulate (Bowyer-Watson); keep in-material triangles
 //   6. ribs = kept triangle edges + cluster ribs
-//   7. keep a material ring (boss) around EVERY hole of any size
-//   8. CUT: extrude {ribs ∪ bosses} as a tool and INTERSECT it with the plate,
-//      so only the ribs + hole-rings survive (holes preserved, nothing floats)
+//   7. OUTPUT: a SKETCH only -- the rib centrelines (same as the web-app ribs)
+//      plus a reference circle (boss) around every hole. No solid cut is done;
+//      use the sketch to drive your own extrude / Lighten.
 //
 // Coordinates are handled in millimetres internally (plain numbers).
 // ============================================================================
