@@ -101,6 +101,12 @@ function pcSortByValueDesc(arr) {
     return a;
 }
 
+// union-find root (path-halving), FS-friendly
+function pcUFFind(parent, a) {
+    while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+    return a;
+}
+
 // ---- Delaunay (Bowyer-Watson), same approach as the .fs ------------------
 
 function pcCircumcircleContains(ax, ay, bx, by, cx, cy, px, py) {
@@ -272,9 +278,11 @@ function pcRoundedInsetTriangle(A, B, C, d, R) {
 function pcGenerate(plate, params) {
     var s = params.triangleSize;
     var minR = (params.minHoleDia || 0) / 2;
-    // Declustering is OFF by default: every hole is kept as a triangulation
-    // vertex. The optional declusterDist only drops holes if the user sets it > 0.
-    var dropDist = params.declusterDist;
+    // Holes within mergeDist of each other are "very close": they merge into a
+    // single vertex at the cluster centroid and are ribbed to it (a close pair
+    // becomes one midpoint vertex with a rib joining the two holes). 0 = never
+    // merge (every hole is its own vertex). No hole is ever simply dropped.
+    var mergeDist = params.declusterDist;
     var maxEdge = (params.maxEdgeFactor || 2.8) * s;
     var marginMm = params.edgeMargin || 6;
     var d = params.ribWidth / 2;
@@ -296,32 +304,50 @@ function pcGenerate(plate, params) {
         if (!dup) holes.push(h);
     }
 
-    // 2. decluster: keep largest-first, drop any hole within dropDist of a kept one
-    var order = [];
-    for (var k = 0; k < holes.length; k += 1) order.push([k, holes[k].r]);
-    order = pcSortByValueDesc(order);
+    // 2. merge very-close holes into clusters (union-find on pairwise distance).
+    var parent = [];
+    for (var pf = 0; pf < holes.length; pf += 1) parent.push(pf);
+    if (mergeDist > 0) {
+        for (var ci = 0; ci < holes.length; ci += 1) {
+            for (var cj = ci + 1; cj < holes.length; cj += 1) {
+                if (pcDist([holes[ci].x, holes[ci].y], [holes[cj].x, holes[cj].y]) < mergeDist) {
+                    parent[pcUFFind(parent, ci)] = pcUFFind(parent, cj);
+                }
+            }
+        }
+    }
+    // group holes by cluster root; one vertex per cluster at its centroid.
+    var groups = {};
+    for (var gi = 0; gi < holes.length; gi += 1) {
+        var root = pcUFFind(parent, gi);
+        if (!groups[root]) groups[root] = [];
+        groups[root].push(gi);
+    }
     var nodePts = [];
     var nodeIsHole = [];
     var nodeR = [];
     var kept = [];
-    var holeIsVertex = [];
-    for (var hv = 0; hv < holes.length; hv += 1) holeIsVertex.push(false);
-    // Holes are prioritised FIRST (added before any lattice fill) so the
-    // triangulation is anchored on real holes; declustering only thins holes
-    // that are packed closer than dropDist (those get a support strut later so
-    // they are still attached to the network).
-    for (var oi = 0; oi < order.length; oi += 1) {
-        var hi = order[oi][0];
-        var hp = [holes[hi].x, holes[hi].y];
-        if (!pcInMaterial(poly, inners, hp)) continue;
-        var skip = false;
-        for (var kp = 0; kp < kept.length; kp += 1) {
-            if (pcDist(hp, kept[kp]) < dropDist) { skip = true; break; }
+    var clusterRibs = [];   // ribs joining merged holes to their cluster vertex
+    for (var gk in groups) {
+        if (!groups.hasOwnProperty(gk)) continue;
+        var mem = groups[gk];
+        var cx = 0, cy = 0, rmax = 0;
+        for (var mm = 0; mm < mem.length; mm += 1) {
+            cx += holes[mem[mm]].x; cy += holes[mem[mm]].y;
+            if (holes[mem[mm]].r > rmax) rmax = holes[mem[mm]].r;
         }
-        if (skip) continue;
-        kept.push(hp);
-        holeIsVertex[hi] = true;
-        nodePts.push(hp); nodeIsHole.push(true); nodeR.push(holes[hi].r);
+        cx /= mem.length; cy /= mem.length;
+        var cpt = [cx, cy];
+        if (!pcInMaterial(poly, inners, cpt)) continue;
+        nodePts.push(cpt); nodeIsHole.push(true); nodeR.push(rmax); kept.push(cpt);
+        // a multi-hole cluster: rib each member hole to the centroid vertex
+        // (a 2-hole cluster => the two ribs form the single hole-to-hole rib
+        //  through the midpoint).
+        if (mem.length >= 2) {
+            for (var mr = 0; mr < mem.length; mr += 1) {
+                clusterRibs.push([[holes[mem[mr]].x, holes[mem[mr]].y], cpt]);
+            }
+        }
     }
 
     // 2b. optional lattice gap-fill (default off)
@@ -401,21 +427,9 @@ function pcGenerate(plate, params) {
         bosses.push({ x: holes[bi].x, y: holes[bi].y, r: holes[bi].r, R: holes[bi].r + holeMargin });
     }
 
-    // 6. guarantee every hole is attached: any hole that did NOT become a
-    //    triangulation vertex (declustered) gets a support strut to the nearest
-    //    vertex, so its boss can never become a floating island of material.
-    var struts = [];
-    for (var si = 0; si < holes.length; si += 1) {
-        if (holeIsVertex[si]) continue;
-        var hpS = [holes[si].x, holes[si].y];
-        if (!pcInMaterial(poly, inners, hpS)) continue;
-        var best = -1, bestD = 1e18;
-        for (var vi = 0; vi < nNodes; vi += 1) {
-            var dd2 = pcDist(hpS, nodePts[vi]);
-            if (dd2 < bestD) { bestD = dd2; best = vi; }
-        }
-        if (best >= 0) struts.push([hpS, nodePts[best]]);
-    }
+    // 6. attachment ribs = the cluster ribs joining each merged hole to its
+    //    centroid vertex, so every merged hole stays tied into the network.
+    var struts = clusterRibs;
 
     return {
         vertices: pts,

@@ -43,7 +43,7 @@
     <h2>Algorithm</h2>
     <div class="row"><label>Triangle size</label><input type="range" id="s" min="10" max="60" step="0.5" value="30"><output id="sV"></output></div>
     <div class="row"><label>Min hole Ø</label><input type="range" id="minR" min="0" max="15" step="0.5" value="2"><output id="minRV"></output></div>
-    <div class="row"><label>Decluster (0=keep all)</label><input type="range" id="dc" min="0" max="40" step="0.5" value="0"><output id="dcV"></output></div>
+    <div class="row"><label>Merge holes &lt;</label><input type="range" id="dc" min="0" max="40" step="0.5" value="12"><output id="dcV"></output></div>
     <div class="row"><label>Max edge ×s</label><input type="range" id="me" min="1.4" max="4" step="0.1" value="2.8"><output id="meV"></output></div>
     <div class="row"><label>Rib width</label><input type="range" id="rw" min="2" max="12" step="0.1" value="6"><output id="rwV"></output></div>
     <div class="row"><label>Corner fillet</label><input type="range" id="fl" min="0" max="6" step="0.1" value="2"><output id="flV"></output></div>
@@ -220,7 +220,7 @@ function run(){
       "holes (input): "+plate.holes.length+"\n"+
       "holes kept: "+result.info.holes+"\n"+
       "mesh vertices: "+result.info.holesUsed+"\n"+
-      "support struts: "+result.info.struts+"\n"+
+      "merge ribs: "+result.info.struts+"\n"+
       "ribs: "+result.info.ribs+"\n"+
       "pockets: "+result.info.pockets+"\n"+
       "compute: "+(t1-t0).toFixed(1)+" ms";
