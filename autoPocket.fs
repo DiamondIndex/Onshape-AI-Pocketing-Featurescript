@@ -311,16 +311,18 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         if (size(evaluateQuery(context, keepRegions)) == 0)
             throw regenError("No ribs generated; adjust triangle size / merge distance.");
 
-        opExtrude(context, id + "lighten", {
+        opExtrude(context, id + "keepTool", {
                     "entities" : keepRegions,
                     "direction" : plane.normal,
                     "endBound" : BoundingType.BLIND,
                     "endDepth" : 0.5 * meter,
                     "startBound" : BoundingType.BLIND,
                     "startDepth" : 0.5 * meter,
-                    "operationType" : NewBodyOperationType.INTERSECT,
-                    "defaultScope" : false,
-                    "booleanScope" : qOwnerBody(definition.face) });
+                    "operationType" : NewBodyOperationType.NEW });
+
+        opBoolean(context, id + "lighten", {
+                    "tools" : qUnion([qOwnerBody(definition.face), qCreatedBy(id + "keepTool", EntityType.BODY)]),
+                    "operationType" : BooleanOperationType.INTERSECTION });
 
         reportFeatureInfo(context, id, size(ribs) ~ " ribs, " ~ size(holes) ~ " holes, "
                 ~ size(clusterRibs) ~ " merge ribs.");
