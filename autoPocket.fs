@@ -61,12 +61,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         annotation { "Name" : "Merge holes closer than" }
         isLength(definition.mergeDist, MERGE_BOUNDS);
 
-        annotation { "Name" : "Rib width" }
-        isLength(definition.ribWidth, RIB_BOUNDS);
-
-        annotation { "Name" : "Pocket corner fillet" }
-        isLength(definition.pocketFillet, FILLET_BOUNDS);
-
         annotation { "Name" : "Material around holes" }
         isLength(definition.holeMargin, HOLEMAT_BOUNDS);
 
@@ -89,7 +83,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         const plane = evPlane(context, { "face" : definition.face });
         const s = definition.triangleSize / millimeter;
         const mergeDist = definition.mergeDist / millimeter;
-        const ribW = definition.ribWidth / millimeter;
         const holeMargin = definition.holeMargin / millimeter;
         const marginMm = definition.edgeMargin / millimeter;
         const minR = (definition.minHoleDiameter / 2) / millimeter;
@@ -273,56 +266,25 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         for (var key in keys(ribSet)) ribs = append(ribs, ribSet[key]);
         for (var cr in clusterRibs) ribs = append(ribs, cr);
 
-        // ----- 7. build KEEP sketch: rib bands + hole bosses --------------
-        const keepSk = newSketchOnPlane(context, id + "keep", { "sketchPlane" : plane });
-        const hw = ribW / 2;
+        // ----- 7. draw the rib network as a SKETCH only (no solid cut) ----
+        // Exactly the web-app ribs: kept Delaunay edges + cluster ribs, drawn as
+        // centrelines, plus a reference circle (boss) around each hole.
+        const ribSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
         var ri = 0;
         for (var rib in ribs)
         {
             const a = rib[0]; const b = rib[1];
-            const dx = b[0] - a[0]; const dy = b[1] - a[1];
-            const L = sqrt(dx * dx + dy * dy);
-            if (L < 1e-6) continue;
-            const ux = dx / L; const uy = dy / L;        // along rib
-            const nx = -uy; const ny = ux;               // across rib
-            // extend ends by hw so ribs overlap at junctions
-            const a2 = [a[0] - ux * hw, a[1] - uy * hw];
-            const b2 = [b[0] + ux * hw, b[1] + uy * hw];
-            const c1 = [a2[0] + nx * hw, a2[1] + ny * hw];
-            const c2 = [b2[0] + nx * hw, b2[1] + ny * hw];
-            const c3 = [b2[0] - nx * hw, b2[1] - ny * hw];
-            const c4 = [a2[0] - nx * hw, a2[1] - ny * hw];
-            const corners = [c1, c2, c3, c4];
-            for (var k = 0; k < 4; k += 1)
-                skLineSegment(keepSk, "r" ~ ri ~ "_" ~ k, {
-                            "start" : vector(corners[k][0] * millimeter, corners[k][1] * millimeter),
-                            "end"   : vector(corners[(k + 1) % 4][0] * millimeter, corners[(k + 1) % 4][1] * millimeter) });
+            if (pointDistance(a, b) < 1e-6) continue;
+            skLineSegment(ribSketch, "rib" ~ ri, {
+                        "start" : vector(a[0] * millimeter, a[1] * millimeter),
+                        "end"   : vector(b[0] * millimeter, b[1] * millimeter) });
             ri += 1;
         }
-        // material ring (boss) around EVERY hole of any size
         for (var i = 0; i < size(holes); i += 1)
-            skCircle(keepSk, "boss" ~ i, {
+            skCircle(ribSketch, "boss" ~ i, {
                         "center" : vector(holes[i][0] * millimeter, holes[i][1] * millimeter),
                         "radius" : (hRad[i] + holeMargin) * millimeter });
-        skSolve(keepSk);
-
-        // ----- 8. cut: extrude keep region, intersect with the plate ------
-        const keepRegions = qSketchRegion(id + "keep");
-        if (size(evaluateQuery(context, keepRegions)) == 0)
-            throw regenError("No ribs generated; adjust triangle size / merge distance.");
-
-        opExtrude(context, id + "keepTool", {
-                    "entities" : keepRegions,
-                    "direction" : plane.normal,
-                    "endBound" : BoundingType.BLIND,
-                    "endDepth" : 0.5 * meter,
-                    "startBound" : BoundingType.BLIND,
-                    "startDepth" : 0.5 * meter,
-                    "operationType" : NewBodyOperationType.NEW });
-
-        opBoolean(context, id + "lighten", {
-                    "tools" : qUnion([qOwnerBody(definition.face), qCreatedBy(id + "keepTool", EntityType.BODY)]),
-                    "operationType" : BooleanOperationType.INTERSECTION });
+        skSolve(ribSketch);
 
         reportFeatureInfo(context, id, size(ribs) ~ " ribs, " ~ size(holes) ~ " holes, "
                 ~ size(clusterRibs) ~ " merge ribs.");
