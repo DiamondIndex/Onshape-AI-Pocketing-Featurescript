@@ -47,6 +47,9 @@ export const MAXEDGE_BOUNDS = { (unitless) : [1.4, 2.8, 6.0] } as RealBoundSpec;
 export const ANGLE_BOUNDS = { (degree) : [0.0, 25.0, 80.0],
         (radian) : 0.4363323129985824 } as AngleBoundSpec;
 
+export const POCKET_BOUNDS = { (meter) : [0.0, 0.004, 0.05],
+        (centimeter) : 0.4, (millimeter) : 4.0, (inch) : 0.16 } as LengthBoundSpec;
+
 // ----- feature --------------------------------------------------------------
 
 annotation { "Feature Type Name" : "Auto Pocket" }
@@ -81,6 +84,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Minimum angle between ribs" }
         isAngle(definition.minRibAngle, ANGLE_BOUNDS);
+
+        annotation { "Name" : "Remove pockets smaller than" }
+        isLength(definition.minPocket, POCKET_BOUNDS);
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -290,6 +296,34 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
+        // ----- 6-merge: dissolve tiny pockets ------------------------------
+        // A pocket whose incircle is smaller than this is a sliver; drop its
+        // shortest rib so it merges into the neighbouring pocket (the user's
+        // "remove the excess rib" request).
+        const minPocketR = definition.minPocket / millimeter;
+        if (minPocketR > 0)
+        {
+            var removeKeys = {};
+            for (var tri in triangles)
+            {
+                const A = pts[tri[0]]; const B = pts[tri[1]]; const C = pts[tri[2]];
+                const cen = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+                if (!inMaterial(poly, inners, cen)) continue;
+                const la = pointDistance(B, C); const lb = pointDistance(C, A); const lc = pointDistance(A, B);
+                const per = la + lb + lc;
+                if (per < 1e-6) continue;
+                const area2 = abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1]));
+                if (area2 / per >= minPocketR) continue;   // incircle radius = area / semiperimeter
+                var s0 = tri[0]; var s1 = tri[1]; var sl = lc;
+                if (la < sl) { s0 = tri[1]; s1 = tri[2]; sl = la; }
+                if (lb < sl) { s0 = tri[2]; s1 = tri[0]; sl = lb; }
+                removeKeys[min(s0, s1) ~ "_" ~ max(s0, s1)] = true;
+            }
+            var edgeT = {};
+            for (var key in keys(edgeIdx)) if (removeKeys[key] == undefined) edgeT[key] = edgeIdx[key];
+            edgeIdx = edgeT;
+        }
+
         // ----- 6a. thin out acute / redundant ribs ------------------------
         // The starburst of ribs at dense holes meet at tiny angles; when Part
         // Lightening thickens them they self-collide ("failed to finalize and
@@ -341,6 +375,61 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             var edge2 = {};
             for (var key in keys(edgeIdx)) if (prunedE[key] == undefined) edge2[key] = edgeIdx[key];
             edgeIdx = edge2;
+        }
+
+        // ----- 6c. struts all the way round every hole --------------------
+        // Each hole should be braced from every direction, not just one side:
+        // for each 90-degree quadrant with no rib, add the nearest in-material
+        // strut in that quadrant. Long struts into an empty quadrant also fill
+        // big open areas like the plate centre.
+        var inc3 = {};
+        for (var key in keys(edgeIdx))
+        {
+            const e = edgeIdx[key];
+            const k0 = e[0] ~ ""; const k1 = e[1] ~ "";
+            if (inc3[k0] == undefined) inc3[k0] = [];
+            if (inc3[k1] == undefined) inc3[k1] = [];
+            inc3[k0] = append(inc3[k0], key);
+            inc3[k1] = append(inc3[k1], key);
+        }
+        for (var h = 0; h < nHole; h += 1)
+        {
+            var quad = [false, false, false, false];
+            const hk = h ~ "";
+            if (inc3[hk] != undefined)
+                for (var ki = 0; ki < size(inc3[hk]); ki += 1)
+                {
+                    const e = edgeIdx[inc3[hk][ki]];
+                    const o = (e[0] == h) ? e[1] : e[0];
+                    const dx = pts[o][0] - pts[h][0]; const dy = pts[o][1] - pts[h][1];
+                    quad[(dx >= 0) ? ((dy >= 0) ? 0 : 3) : ((dy >= 0) ? 1 : 2)] = true;
+                }
+            for (var qi = 0; qi < 4; qi += 1)
+            {
+                if (quad[qi]) continue;
+                var best = -1; var bestD = 1e18;
+                for (var v = 0; v < size(pts); v += 1)
+                {
+                    if (v == h) continue;
+                    const dx = pts[v][0] - pts[h][0]; const dy = pts[v][1] - pts[h][1];
+                    if (((dx >= 0) ? ((dy >= 0) ? 0 : 3) : ((dy >= 0) ? 1 : 2)) != qi) continue;
+                    const dd = dx * dx + dy * dy;
+                    if (dd < bestD) { bestD = dd; best = v; }
+                }
+                if (best >= 0)
+                {
+                    var clearStrut = true;
+                    for (var t = 1; t <= 9; t += 1)
+                    {
+                        const f = t / 10;
+                        const sp = [pts[h][0] + (pts[best][0] - pts[h][0]) * f,
+                                    pts[h][1] + (pts[best][1] - pts[h][1]) * f];
+                        if (!inMaterial(poly, inners, sp)) { clearStrut = false; break; }
+                    }
+                    if (clearStrut)
+                        edgeIdx[min(h, best) ~ "_" ~ max(h, best)] = [min(h, best), max(h, best)];
+                }
+            }
         }
 
         // ----- 6b. force ONE connected rib network ------------------------
