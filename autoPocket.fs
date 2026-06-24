@@ -232,13 +232,34 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
-        // ----- 5. rim sampling --------------------------------------------
+        // ----- 5. rim sampling (inset INWARD off the boundary) ------------
+        // Rib ends that sit exactly on the plate edge go degenerate when Part
+        // Lightening thickens them ("failed to finalize and boolean"), so pull
+        // each rim point a little inward (toward the plate centroid) so ribs end
+        // inside the material and merge cleanly with the perimeter wall.
+        var cenX = 0; var cenY = 0;
+        for (var p in poly) { cenX += p[0]; cenY += p[1]; }
+        cenX = cenX / size(poly); cenY = cenY / size(poly);
+        const rimInset = max(marginMm, 0.15 * s);
         var rim = [];
         var acc = s;
         for (var i = 0; i < size(poly); i += 1)
         {
             acc += pointDistance(poly[i], poly[(i + 1) % size(poly)]);
-            if (acc >= s) { rim = append(rim, poly[i]); acc = 0; }
+            if (acc >= s)
+            {
+                const rp = poly[i];
+                const dx = cenX - rp[0]; const dy = cenY - rp[1];
+                const dl = sqrt(dx * dx + dy * dy);
+                var ip = rp;
+                if (dl > 1e-6)
+                {
+                    const cand = [rp[0] + dx / dl * rimInset, rp[1] + dy / dl * rimInset];
+                    if (inMaterial(poly, inners, cand)) ip = cand;
+                }
+                rim = append(rim, ip);
+                acc = 0;
+            }
         }
         rim = dedupePoints(rim, 0.4 * s);
 
