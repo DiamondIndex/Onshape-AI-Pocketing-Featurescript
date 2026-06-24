@@ -44,6 +44,9 @@ export const MINHOLE_BOUNDS = { (meter) : [0.0, 0.0, 5.0],
 
 export const MAXEDGE_BOUNDS = { (unitless) : [1.4, 2.8, 6.0] } as RealBoundSpec;
 
+export const ANGLE_BOUNDS = { (degree) : [0.0, 25.0, 80.0],
+        (radian) : 0.4363323129985824 } as AngleBoundSpec;
+
 // ----- feature --------------------------------------------------------------
 
 annotation { "Feature Type Name" : "Auto Pocket" }
@@ -75,6 +78,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Even spacing (fill sparse gaps)" }
         definition.evenSpacing is boolean;
+
+        annotation { "Name" : "Minimum angle between ribs" }
+        isAngle(definition.minRibAngle, ANGLE_BOUNDS);
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -263,6 +269,59 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
+        // ----- 6a. thin out acute / redundant ribs ------------------------
+        // The starburst of ribs at dense holes meet at tiny angles; when Part
+        // Lightening thickens them they self-collide ("failed to finalize and
+        // boolean"). At each vertex keep a well-spread set of ribs (shortest
+        // first) and drop any whose direction is within the minimum angle of one
+        // already kept.
+        const cosMin = cos(definition.minRibAngle);
+        if (definition.minRibAngle > 0 * degree)
+        {
+            var incident = {};
+            for (var key in keys(edgeIdx))
+            {
+                const e = edgeIdx[key];
+                const k0 = e[0] ~ ""; const k1 = e[1] ~ "";
+                if (incident[k0] == undefined) incident[k0] = [];
+                if (incident[k1] == undefined) incident[k1] = [];
+                incident[k0] = append(incident[k0], key);
+                incident[k1] = append(incident[k1], key);
+            }
+            var prunedE = {};
+            for (var v = 0; v < size(pts); v += 1)
+            {
+                const vk = v ~ "";
+                if (incident[vk] == undefined) continue;
+                var live = [];
+                for (var ii = 0; ii < size(incident[vk]); ii += 1)
+                {
+                    const key = incident[vk][ii];
+                    if (prunedE[key] != undefined) continue;
+                    const e = edgeIdx[key];
+                    const other = (e[0] == v) ? e[1] : e[0];
+                    const len = pointDistance(pts[v], pts[other]);
+                    if (len < 1e-6) continue;
+                    live = append(live, [key, (pts[other][0] - pts[v][0]) / len,
+                                              (pts[other][1] - pts[v][1]) / len, len]);
+                }
+                live = sortByLenAsc(live);
+                var keptU = [];
+                for (var li = 0; li < size(live); li += 1)
+                {
+                    const ux = live[li][1]; const uy = live[li][2];
+                    var ok = true;
+                    for (var ka = 0; ka < size(keptU); ka += 1)
+                        if (ux * keptU[ka][0] + uy * keptU[ka][1] > cosMin) { ok = false; break; }
+                    if (ok) keptU = append(keptU, [ux, uy]);
+                    else prunedE[live[li][0]] = true;
+                }
+            }
+            var edge2 = {};
+            for (var key in keys(edgeIdx)) if (prunedE[key] == undefined) edge2[key] = edgeIdx[key];
+            edgeIdx = edge2;
+        }
+
         // ----- 6b. force ONE connected rib network ------------------------
         // Part Lightening fails ("results in more than one part") if the kept
         // ribs (or any hole) form disconnected islands. Bridge every component
@@ -427,6 +486,19 @@ function dedupePoints(arr is array, tol is number) returns array
         if (!dup) out = append(out, arr[i]);
     }
     return out;
+}
+
+function sortByLenAsc(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+            if (a[j][3] < a[mi][3]) mi = j;
+        if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
+    }
+    return a;
 }
 
 function ufFind(parent is array, a) returns number
