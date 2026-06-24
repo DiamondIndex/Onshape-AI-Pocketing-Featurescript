@@ -47,6 +47,12 @@ export const MAXEDGE_BOUNDS = { (unitless) : [1.4, 2.8, 6.0] } as RealBoundSpec;
 export const ANGLE_BOUNDS = { (degree) : [0.0, 25.0, 80.0],
         (radian) : 0.4363323129985824 } as AngleBoundSpec;
 
+export const POCKET_BOUNDS = { (meter) : [0.0, 0.004, 0.05],
+        (centimeter) : 0.4, (millimeter) : 4.0, (inch) : 0.16 } as LengthBoundSpec;
+
+export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
+        (radian) : 0.2617993877991494 } as AngleBoundSpec;
+
 // ----- feature --------------------------------------------------------------
 
 annotation { "Feature Type Name" : "Auto Pocket" }
@@ -81,6 +87,12 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Minimum angle between ribs" }
         isAngle(definition.minRibAngle, ANGLE_BOUNDS);
+
+        annotation { "Name" : "Remove pockets smaller than" }
+        isLength(definition.minPocket, POCKET_BOUNDS);
+
+        annotation { "Name" : "Avoid ribs within this angle of vertical" }
+        isAngle(definition.vertTol, VERT_BOUNDS);
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -92,6 +104,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         const marginMm = definition.edgeMargin / millimeter;
         const minR = (definition.minHoleDiameter / 2) / millimeter;
         const maxEdge = definition.maxEdgeFactor * s;
+        const sinVert = sin(definition.vertTol);   // a rib is "vertical" if |dx|/len < sinVert
 
         // ----- 1. read holes + outline ------------------------------------
         var holePts = [];
@@ -290,6 +303,34 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
+        // ----- 6-merge: dissolve tiny pockets ------------------------------
+        // A pocket whose incircle is smaller than this is a sliver; drop the
+        // shortest rib bounding it so it merges into its neighbour (the user's
+        // "remove the strut that makes the pocket smaller than it should be").
+        const minPocketR = definition.minPocket / millimeter;
+        if (minPocketR > 0)
+        {
+            var removeKeys = {};
+            for (var tri in triangles)
+            {
+                const A = pts[tri[0]]; const B = pts[tri[1]]; const C = pts[tri[2]];
+                const cen = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+                if (!inMaterial(poly, inners, cen)) continue;
+                const la = pointDistance(B, C); const lb = pointDistance(C, A); const lc = pointDistance(A, B);
+                const per = la + lb + lc;
+                if (per < 1e-6) continue;
+                const area2 = abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1]));
+                if (area2 / per >= minPocketR) continue;   // incircle radius = area / semiperimeter
+                var p0 = tri[0]; var p1 = tri[1]; var sl = lc;
+                if (la < sl) { p0 = tri[1]; p1 = tri[2]; sl = la; }
+                if (lb < sl) { p0 = tri[2]; p1 = tri[0]; sl = lb; }
+                removeKeys[min(p0, p1) ~ "_" ~ max(p0, p1)] = true;
+            }
+            var edgeT = {};
+            for (var key in keys(edgeIdx)) if (removeKeys[key] == undefined) edgeT[key] = edgeIdx[key];
+            edgeIdx = edgeT;
+        }
+
         // ----- 6a. thin out acute / redundant ribs ------------------------
         // The starburst of ribs at dense holes meet at tiny angles; when Part
         // Lightening thickens them they self-collide ("failed to finalize and
@@ -343,6 +384,89 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             edgeIdx = edge2;
         }
 
+        // ----- 6a2. drop (almost) vertical ribs ---------------------------
+        // No vertical / near-vertical lines in the pocketing.
+        if (sinVert > 0)
+        {
+            var edgeV = {};
+            for (var key in keys(edgeIdx))
+            {
+                const e = edgeIdx[key];
+                const dx = pts[e[1]][0] - pts[e[0]][0];
+                const dy = pts[e[1]][1] - pts[e[0]][1];
+                const len = sqrt(dx * dx + dy * dy);
+                if (len > 1e-6 && abs(dx) / len < sinVert) continue;   // skip near-vertical
+                edgeV[key] = e;
+            }
+            edgeIdx = edgeV;
+        }
+
+        // ----- 6a3. brace every hole within 180 degrees -------------------
+        // Each hole must have struts on more than one side: if its struts all
+        // fall inside a half-circle, add the nearest non-vertical strut into the
+        // empty side.
+        var incH = {};
+        for (var key in keys(edgeIdx))
+        {
+            const e = edgeIdx[key];
+            const k0 = e[0] ~ ""; const k1 = e[1] ~ "";
+            if (incH[k0] == undefined) incH[k0] = [];
+            if (incH[k1] == undefined) incH[k1] = [];
+            incH[k0] = append(incH[k0], key);
+            incH[k1] = append(incH[k1], key);
+        }
+        for (var h = 0; h < nHole; h += 1)
+        {
+            const hk = h ~ "";
+            var angs = [];
+            if (incH[hk] != undefined)
+                for (var ki = 0; ki < size(incH[hk]); ki += 1)
+                {
+                    const e = edgeIdx[incH[hk][ki]];
+                    const o = (e[0] == h) ? e[1] : e[0];
+                    angs = append(angs, atan2(pts[o][1] - pts[h][1], pts[o][0] - pts[h][0]) / radian);
+                }
+            if (size(angs) == 0) continue;            // isolated hole -> bridge handles it
+            angs = sortNums(angs);
+            var maxGap = -1.0; var gapMid = 0.0;
+            for (var gi = 0; gi < size(angs); gi += 1)
+            {
+                const a0 = angs[gi];
+                const a1 = (gi + 1 < size(angs)) ? angs[gi + 1] : angs[0] + 2 * PI;
+                if (a1 - a0 > maxGap) { maxGap = a1 - a0; gapMid = (a0 + a1) / 2; }
+            }
+            if (maxGap <= PI) continue;               // already braced within 180 deg
+            var best = -1; var bestD = 1e18;
+            for (var v = 0; v < size(pts); v += 1)
+            {
+                if (v == h) continue;
+                const dx = pts[v][0] - pts[h][0]; const dy = pts[v][1] - pts[h][1];
+                const len = sqrt(dx * dx + dy * dy);
+                if (len < 1e-6 || abs(dx) / len < sinVert) continue;   // skip self + vertical
+                var d = atan2(dy, dx) / radian - gapMid;
+                while (d > PI) d -= 2 * PI;
+                while (d < -PI) d += 2 * PI;
+                if (abs(d) > maxGap / 2) continue;     // direction not inside the empty side
+                if (len < bestD) { bestD = len; best = v; }
+            }
+            if (best >= 0)
+            {
+                var clear = true;
+                for (var t = 1; t <= 9; t += 1)
+                {
+                    const f = t / 10;
+                    const sp = [pts[h][0] + (pts[best][0] - pts[h][0]) * f,
+                                pts[h][1] + (pts[best][1] - pts[h][1]) * f];
+                    if (!inMaterial(poly, inners, sp)) { clear = false; break; }
+                }
+                if (clear)
+                {
+                    edgeIdx[min(h, best) ~ "_" ~ max(h, best)] = [min(h, best), max(h, best)];
+                    incH[hk] = append((incH[hk] == undefined) ? [] : incH[hk], min(h, best) ~ "_" ~ max(h, best));
+                }
+            }
+        }
+
         // ----- 6b. force ONE connected rib network ------------------------
         // Part Lightening fails ("results in more than one part") if the kept
         // ribs (or any hole) form disconnected islands. Bridge every component
@@ -379,7 +503,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     for (var i2 = 0; i2 < size(must); i2 += 1)
                     {
                         if (ufFind(par2, must[i2]) == rootA) continue;
-                        const dd = pointDistance(pts[must[i1]], pts[must[i2]]);
+                        var dd = pointDistance(pts[must[i1]], pts[must[i2]]);
+                        const bdx = pts[must[i2]][0] - pts[must[i1]][0];
+                        const bdy = pts[must[i2]][1] - pts[must[i1]][1];
+                        const blen = sqrt(bdx * bdx + bdy * bdy);
+                        if (blen > 1e-6 && abs(bdx) / blen < sinVert) dd = dd * 100;   // avoid vertical bridges
                         if (dd < bD) { bD = dd; bU = must[i1]; bV = must[i2]; }
                     }
                 }
@@ -396,7 +524,13 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             const ed = edgeIdx[key];
             ribs = append(ribs, [pts[ed[0]], pts[ed[1]]]);
         }
-        for (var cr in clusterRibs) ribs = append(ribs, cr);
+        for (var cr in clusterRibs)
+        {
+            const dx = cr[1][0] - cr[0][0]; const dy = cr[1][1] - cr[0][1];
+            const len = sqrt(dx * dx + dy * dy);
+            if (sinVert > 0 && len > 1e-6 && abs(dx) / len < sinVert) continue;   // no vertical cluster ribs
+            ribs = append(ribs, cr);
+        }
 
         // ----- 7. draw the rib network as a SKETCH only (no solid cut) ----
         // Exactly the web-app ribs: kept Delaunay edges + cluster ribs, drawn as
@@ -517,6 +651,19 @@ function sortByLenAsc(arr is array) returns array
         var mi = i;
         for (var j = i + 1; j < size(a); j += 1)
             if (a[j][3] < a[mi][3]) mi = j;
+        if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
+    }
+    return a;
+}
+
+function sortNums(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+            if (a[j] < a[mi]) mi = j;
         if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
     }
     return a;
