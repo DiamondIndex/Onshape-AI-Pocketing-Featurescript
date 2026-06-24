@@ -83,7 +83,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         const plane = evPlane(context, { "face" : definition.face });
         const s = definition.triangleSize / millimeter;
         const mergeDist = definition.mergeDist / millimeter;
-        const holeMargin = definition.holeMargin / millimeter;
         const marginMm = definition.edgeMargin / millimeter;
         const minR = (definition.minHoleDiameter / 2) / millimeter;
         const maxEdge = definition.maxEdgeFactor * s;
@@ -333,10 +332,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                         "end"   : vector(b[0] * millimeter, b[1] * millimeter) });
             ri += 1;
         }
-        for (var i = 0; i < size(holes); i += 1)
-            skCircle(ribSketch, "boss" ~ i, {
-                        "center" : vector(holes[i][0] * millimeter, holes[i][1] * millimeter),
-                        "radius" : (hRad[i] + holeMargin) * millimeter });
         skSolve(ribSketch);
 
         reportFeatureInfo(context, id, size(ribs) ~ " ribs, " ~ size(holes) ~ " holes, "
