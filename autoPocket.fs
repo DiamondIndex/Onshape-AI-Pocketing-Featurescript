@@ -194,6 +194,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 for (var m = 0; m < size(mem); m += 1)
                     clusterRibs = append(clusterRibs, [holes[mem[m]], cpt]);
         }
+        const nHole = size(nodePts);   // hole vertices are nodePts[0 .. nHole-1]
 
         // ----- 4. even-spacing lattice fill (optional) --------------------
         if (definition.evenSpacing)
@@ -242,7 +243,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         // ----- 6. Delaunay + keep in-material triangle edges --------------
         const triangles = bowyerWatson(pts);
-        var ribSet = {};
+        var edgeIdx = {};                      // "lo_hi" -> [lo, hi]
         for (var tri in triangles)
         {
             const A = pts[tri[0]]; const B = pts[tri[1]]; const C = pts[tri[2]];
@@ -259,11 +260,63 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             {
                 const lo = min(e[k][0], e[k][1]);
                 const hi = max(e[k][0], e[k][1]);
-                ribSet[lo ~ "_" ~ hi] = [pts[lo], pts[hi]];
+                edgeIdx[lo ~ "_" ~ hi] = [lo, hi];
             }
         }
+
+        // ----- 6b. force ONE connected rib network ------------------------
+        // Part Lightening fails ("results in more than one part") if the kept
+        // ribs (or any hole) form disconnected islands. Bridge every component
+        // to the rest with the shortest link, so the whole web is one piece and
+        // every hole is tied in.
+        var par2 = [];
+        for (var i = 0; i < size(pts); i += 1) par2 = append(par2, i);
+        var inc = [];
+        for (var i = 0; i < size(pts); i += 1) inc = append(inc, false);
+        for (var key in keys(edgeIdx))
+        {
+            const ed = edgeIdx[key];
+            inc[ed[0]] = true; inc[ed[1]] = true;
+            par2[ufFind(par2, ed[0])] = ufFind(par2, ed[1]);
+        }
+        var must = [];
+        for (var i = 0; i < size(pts); i += 1)
+            if (inc[i] || i < nHole) must = append(must, i);
+        if (size(must) >= 2)
+        {
+            var guard = 0;
+            while (guard < 4000)
+            {
+                guard += 1;
+                const rootA = ufFind(par2, must[0]);
+                var allSame = true;
+                for (var mi = 1; mi < size(must); mi += 1)
+                    if (ufFind(par2, must[mi]) != rootA) { allSame = false; break; }
+                if (allSame) break;
+                var bU = -1; var bV = -1; var bD = 1e18;
+                for (var i1 = 0; i1 < size(must); i1 += 1)
+                {
+                    if (ufFind(par2, must[i1]) != rootA) continue;
+                    for (var i2 = 0; i2 < size(must); i2 += 1)
+                    {
+                        if (ufFind(par2, must[i2]) == rootA) continue;
+                        const dd = pointDistance(pts[must[i1]], pts[must[i2]]);
+                        if (dd < bD) { bD = dd; bU = must[i1]; bV = must[i2]; }
+                    }
+                }
+                if (bU < 0) break;
+                const lo2 = min(bU, bV); const hi2 = max(bU, bV);
+                edgeIdx[lo2 ~ "_" ~ hi2] = [lo2, hi2];
+                par2[ufFind(par2, bU)] = ufFind(par2, bV);
+            }
+        }
+
         var ribs = [];
-        for (var key in keys(ribSet)) ribs = append(ribs, ribSet[key]);
+        for (var key in keys(edgeIdx))
+        {
+            const ed = edgeIdx[key];
+            ribs = append(ribs, [pts[ed[0]], pts[ed[1]]]);
+        }
         for (var cr in clusterRibs) ribs = append(ribs, cr);
 
         // ----- 7. draw the rib network as a SKETCH only (no solid cut) ----
