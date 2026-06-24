@@ -53,6 +53,8 @@ export const POCKET_BOUNDS = { (meter) : [0.0, 0.004, 0.05],
 export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
         (radian) : 0.2617993877991494 } as AngleBoundSpec;
 
+export const REFINE_BOUNDS = { (unitless) : [1.0, 1.5, 4.0] } as RealBoundSpec;
+
 // ----- feature --------------------------------------------------------------
 
 annotation { "Feature Type Name" : "Auto Pocket" }
@@ -93,6 +95,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Avoid ribs within this angle of vertical" }
         isAngle(definition.vertTol, VERT_BOUNDS);
+
+        annotation { "Name" : "Subdivide pockets larger than (x triangle size)" }
+        isReal(definition.maxPocketFactor, REFINE_BOUNDS);
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -276,9 +281,39 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         rim = dedupePoints(rim, 0.4 * s);
 
-        const pts = concatenateArrays([nodePts, rim]);
+        var pts = concatenateArrays([nodePts, rim]);
         if (size(pts) < 3)
             throw regenError("Plate too small for this triangle size.", ["triangleSize"]);
+
+        // ----- 5b. subdivide large pockets (Steiner refinement) -----------
+        // A big pocket left by few ribs reads as one large rounded blob once
+        // Part Lightening fillets it, and leaves the plate centre too open. Drop
+        // an organic vertex into any oversized triangle and re-triangulate, so it
+        // splits into similar-size pockets and the open area fills with diagonal
+        // ribs (which the no-vertical rule keeps off-vertical).
+        const refThresh = definition.maxPocketFactor * s;
+        var rpass = 0;
+        while (rpass < 6)
+        {
+            rpass += 1;
+            const tg = bowyerWatson(pts);
+            var addPts = [];
+            for (var tri in tg)
+            {
+                const A = pts[tri[0]]; const B = pts[tri[1]]; const C = pts[tri[2]];
+                const longest = max(max(pointDistance(A, B), pointDistance(B, C)), pointDistance(C, A));
+                if (longest <= refThresh) continue;
+                const cc = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+                if (!inMaterial(poly, inners, cc)) continue;
+                if (distToPolygon(poly, cc) < marginMm || distToInners(inners, cc) < marginMm) continue;
+                var clear = true;
+                for (var pp in pts) if (pointDistance(cc, pp) < 0.6 * s) { clear = false; break; }
+                if (clear) for (var ap in addPts) if (pointDistance(cc, ap) < 0.6 * s) { clear = false; break; }
+                if (clear) addPts = append(addPts, cc);
+            }
+            if (size(addPts) == 0) break;
+            pts = concatenateArrays([pts, addPts]);
+        }
 
         // ----- 6. Delaunay + keep in-material triangle edges --------------
         const triangles = bowyerWatson(pts);
@@ -401,10 +436,10 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             edgeIdx = edgeV;
         }
 
-        // ----- 6a3. brace every hole within 180 degrees -------------------
-        // Each hole must have struts on more than one side: if its struts all
-        // fall inside a half-circle, add the nearest non-vertical strut into the
-        // empty side.
+        // ----- 6a3. brace every hole from all sides -----------------------
+        // No hole should be supported only on one side: keep adding the nearest
+        // non-vertical strut into a hole's largest angular gap until no gap is
+        // wider than 120 degrees.
         var incH = {};
         for (var key in keys(edgeIdx))
         {
@@ -418,39 +453,42 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         for (var h = 0; h < nHole; h += 1)
         {
             const hk = h ~ "";
-            var angs = [];
-            if (incH[hk] != undefined)
-                for (var ki = 0; ki < size(incH[hk]); ki += 1)
+            var tries = 0;
+            while (tries < 5)
+            {
+                tries += 1;
+                var angs = [];
+                if (incH[hk] != undefined)
+                    for (var ki = 0; ki < size(incH[hk]); ki += 1)
+                    {
+                        const e = edgeIdx[incH[hk][ki]];
+                        const o = (e[0] == h) ? e[1] : e[0];
+                        angs = append(angs, atan2(pts[o][1] - pts[h][1], pts[o][0] - pts[h][0]) / radian);
+                    }
+                if (size(angs) == 0) break;           // isolated hole -> bridge handles it
+                angs = sortNums(angs);
+                var maxGap = -1.0; var gapMid = 0.0;
+                for (var gi = 0; gi < size(angs); gi += 1)
                 {
-                    const e = edgeIdx[incH[hk][ki]];
-                    const o = (e[0] == h) ? e[1] : e[0];
-                    angs = append(angs, atan2(pts[o][1] - pts[h][1], pts[o][0] - pts[h][0]) / radian);
+                    const a0 = angs[gi];
+                    const a1 = (gi + 1 < size(angs)) ? angs[gi + 1] : angs[0] + 2 * PI;
+                    if (a1 - a0 > maxGap) { maxGap = a1 - a0; gapMid = (a0 + a1) / 2; }
                 }
-            if (size(angs) == 0) continue;            // isolated hole -> bridge handles it
-            angs = sortNums(angs);
-            var maxGap = -1.0; var gapMid = 0.0;
-            for (var gi = 0; gi < size(angs); gi += 1)
-            {
-                const a0 = angs[gi];
-                const a1 = (gi + 1 < size(angs)) ? angs[gi + 1] : angs[0] + 2 * PI;
-                if (a1 - a0 > maxGap) { maxGap = a1 - a0; gapMid = (a0 + a1) / 2; }
-            }
-            if (maxGap <= PI) continue;               // already braced within 180 deg
-            var best = -1; var bestD = 1e18;
-            for (var v = 0; v < size(pts); v += 1)
-            {
-                if (v == h) continue;
-                const dx = pts[v][0] - pts[h][0]; const dy = pts[v][1] - pts[h][1];
-                const len = sqrt(dx * dx + dy * dy);
-                if (len < 1e-6 || abs(dx) / len < sinVert) continue;   // skip self + vertical
-                var d = atan2(dy, dx) / radian - gapMid;
-                while (d > PI) d -= 2 * PI;
-                while (d < -PI) d += 2 * PI;
-                if (abs(d) > maxGap / 2) continue;     // direction not inside the empty side
-                if (len < bestD) { bestD = len; best = v; }
-            }
-            if (best >= 0)
-            {
+                if (maxGap <= 2 * PI / 3) break;      // braced from all sides (no gap > 120 deg)
+                var best = -1; var bestD = 1e18;
+                for (var v = 0; v < size(pts); v += 1)
+                {
+                    if (v == h) continue;
+                    const dx = pts[v][0] - pts[h][0]; const dy = pts[v][1] - pts[h][1];
+                    const len = sqrt(dx * dx + dy * dy);
+                    if (len < 1e-6 || abs(dx) / len < sinVert) continue;   // skip self + vertical
+                    var d = atan2(dy, dx) / radian - gapMid;
+                    while (d > PI) d -= 2 * PI;
+                    while (d < -PI) d += 2 * PI;
+                    if (abs(d) > maxGap / 2) continue;  // direction not inside the empty side
+                    if (len < bestD) { bestD = len; best = v; }
+                }
+                if (best < 0) break;
                 var clear = true;
                 for (var t = 1; t <= 9; t += 1)
                 {
@@ -459,11 +497,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                                 pts[h][1] + (pts[best][1] - pts[h][1]) * f];
                     if (!inMaterial(poly, inners, sp)) { clear = false; break; }
                 }
-                if (clear)
-                {
-                    edgeIdx[min(h, best) ~ "_" ~ max(h, best)] = [min(h, best), max(h, best)];
-                    incH[hk] = append((incH[hk] == undefined) ? [] : incH[hk], min(h, best) ~ "_" ~ max(h, best));
-                }
+                if (!clear) break;
+                const bkey = min(h, best) ~ "_" ~ max(h, best);
+                if (edgeIdx[bkey] != undefined) break;   // already there -> avoid infinite loop
+                edgeIdx[bkey] = [min(h, best), max(h, best)];
+                incH[hk] = append(incH[hk], bkey);
             }
         }
 
