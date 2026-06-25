@@ -98,6 +98,12 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Subdivide pockets larger than (x triangle size)" }
         isReal(definition.maxPocketFactor, REFINE_BOUNDS);
+
+        annotation { "Name" : "Only triangular pockets" }
+        definition.onlyTriangles is boolean;
+
+        annotation { "Name" : "Equilateral triangles only" }
+        definition.equilateral is boolean;
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -218,8 +224,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     clusterRibs = append(clusterRibs, [holes[mem[m]], cpt]);
         }
 
+        // "Equilateral triangles only" ignores the (irregularly placed) holes as
+        // vertices and triangulates a pure regular lattice instead.
+        if (definition.equilateral)
+        {
+            nodePts = []; kept = []; clusterRibs = [];
+        }
+
         // ----- 4. even-spacing lattice fill (optional) --------------------
-        if (definition.evenSpacing)
+        if (definition.evenSpacing || definition.equilateral)
         {
             const rowH = s * sqrt(3) / 2;
             var bMinX = poly[0][0]; var bMaxX = poly[0][0];
@@ -346,7 +359,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             {
                 const lo = min(e[k][0], e[k][1]);
                 const hi = max(e[k][0], e[k][1]);
-                if (lo >= rimStart && lo < rimEnd && hi >= rimStart && hi < rimEnd)
+                if (!definition.onlyTriangles
+                        && lo >= rimStart && lo < rimEnd && hi >= rimStart && hi < rimEnd)
                 {   // rim-to-rim rib runs along the boundary and traps thin band
                     // pockets against the wall -- pool it, don't draw it.
                     removed[lo ~ "_" ~ hi] = [lo, hi]; removedPri[lo ~ "_" ~ hi] = 3;
@@ -361,7 +375,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         // shortest rib bounding it so it merges into its neighbour (the user's
         // "remove the strut that makes the pocket smaller than it should be").
         const minPocketR = definition.minPocket / millimeter;
-        if (minPocketR > 0)
+        if (minPocketR > 0 && !definition.onlyTriangles)
         {
             var removeKeys = {};
             for (var tri in triangles)
@@ -395,7 +409,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         // first) and drop any whose direction is within the minimum angle of one
         // already kept.
         const cosMin = cos(definition.minRibAngle);
-        if (definition.minRibAngle > 0 * degree)
+        if (definition.minRibAngle > 0 * degree && !definition.onlyTriangles)
         {
             var incident = {};
             for (var key in keys(edgeIdx))
@@ -447,7 +461,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         // ----- 6a2. drop (almost) vertical ribs ---------------------------
         // No vertical / near-vertical lines in the pocketing.
-        if (sinVert > 0)
+        if (sinVert > 0 && !definition.onlyTriangles)
         {
             var edgeV = {};
             for (var key in keys(edgeIdx))
