@@ -257,7 +257,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         var cenX = 0; var cenY = 0;
         for (var p in poly) { cenX += p[0]; cenY += p[1]; }
         cenX = cenX / size(poly); cenY = cenY / size(poly);
-        const rimInset = max(marginMm, 0.15 * s);
+        // Pull rim points only slightly off the edge: enough to avoid the
+        // exact-edge boolean degeneracy, but small enough that rib ends still
+        // land inside the Part-Lightening perimeter wall and merge with it
+        // (a large inset leaves the rib short of the wall -> thin spike pocket).
+        const rimInset = max(1.5, min(marginMm, 0.04 * s));
         var rim = [];
         var acc = s;
         for (var i = 0; i < size(poly); i += 1)
