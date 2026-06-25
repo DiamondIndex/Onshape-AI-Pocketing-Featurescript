@@ -217,7 +217,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 for (var m = 0; m < size(mem); m += 1)
                     clusterRibs = append(clusterRibs, [holes[mem[m]], cpt]);
         }
-        const nHole = size(nodePts);   // hole vertices are nodePts[0 .. nHole-1]
 
         // ----- 4. even-spacing lattice fill (optional) --------------------
         if (definition.evenSpacing)
@@ -338,6 +337,13 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
+        // Removed Delaunay edges are pooled so the network can be reconnected
+        // later using only real (non-crossing) edges -- never arbitrary struts.
+        // Priority: 0 = acute prune, 1 = vertical, 2 = tiny-pocket (re-added last
+        // so dissolved pockets stay dissolved).
+        var removed = {};
+        var removedPri = {};
+
         // ----- 6-merge: dissolve tiny pockets ------------------------------
         // A pocket whose incircle is smaller than this is a sliver; drop the
         // shortest rib bounding it so it merges into its neighbour (the user's
@@ -362,7 +368,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 removeKeys[min(p0, p1) ~ "_" ~ max(p0, p1)] = true;
             }
             var edgeT = {};
-            for (var key in keys(edgeIdx)) if (removeKeys[key] == undefined) edgeT[key] = edgeIdx[key];
+            for (var key in keys(edgeIdx))
+            {
+                if (removeKeys[key] == undefined) edgeT[key] = edgeIdx[key];
+                else { removed[key] = edgeIdx[key]; removedPri[key] = 2; }
+            }
             edgeIdx = edgeT;
         }
 
@@ -415,7 +425,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
             }
             var edge2 = {};
-            for (var key in keys(edgeIdx)) if (prunedE[key] == undefined) edge2[key] = edgeIdx[key];
+            for (var key in keys(edgeIdx))
+            {
+                if (prunedE[key] == undefined) edge2[key] = edgeIdx[key];
+                else { removed[key] = edgeIdx[key]; removedPri[key] = 0; }
+            }
             edgeIdx = edge2;
         }
 
@@ -430,86 +444,19 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 const dx = pts[e[1]][0] - pts[e[0]][0];
                 const dy = pts[e[1]][1] - pts[e[0]][1];
                 const len = sqrt(dx * dx + dy * dy);
-                if (len > 1e-6 && abs(dx) / len < sinVert) continue;   // skip near-vertical
+                if (len > 1e-6 && abs(dx) / len < sinVert)
+                { removed[key] = e; removedPri[key] = 1; continue; }   // pool near-vertical
                 edgeV[key] = e;
             }
             edgeIdx = edgeV;
         }
 
-        // ----- 6a3. brace every hole from all sides -----------------------
-        // No hole should be supported only on one side: keep adding the nearest
-        // non-vertical strut into a hole's largest angular gap until no gap is
-        // wider than 120 degrees.
-        var incH = {};
-        for (var key in keys(edgeIdx))
-        {
-            const e = edgeIdx[key];
-            const k0 = e[0] ~ ""; const k1 = e[1] ~ "";
-            if (incH[k0] == undefined) incH[k0] = [];
-            if (incH[k1] == undefined) incH[k1] = [];
-            incH[k0] = append(incH[k0], key);
-            incH[k1] = append(incH[k1], key);
-        }
-        for (var h = 0; h < nHole; h += 1)
-        {
-            const hk = h ~ "";
-            var tries = 0;
-            while (tries < 5)
-            {
-                tries += 1;
-                var angs = [];
-                if (incH[hk] != undefined)
-                    for (var ki = 0; ki < size(incH[hk]); ki += 1)
-                    {
-                        const e = edgeIdx[incH[hk][ki]];
-                        const o = (e[0] == h) ? e[1] : e[0];
-                        angs = append(angs, atan2(pts[o][1] - pts[h][1], pts[o][0] - pts[h][0]) / radian);
-                    }
-                if (size(angs) == 0) break;           // isolated hole -> bridge handles it
-                angs = sortNums(angs);
-                var maxGap = -1.0; var gapMid = 0.0;
-                for (var gi = 0; gi < size(angs); gi += 1)
-                {
-                    const a0 = angs[gi];
-                    const a1 = (gi + 1 < size(angs)) ? angs[gi + 1] : angs[0] + 2 * PI;
-                    if (a1 - a0 > maxGap) { maxGap = a1 - a0; gapMid = (a0 + a1) / 2; }
-                }
-                if (maxGap <= 2 * PI / 3) break;      // braced from all sides (no gap > 120 deg)
-                var best = -1; var bestD = 1e18;
-                for (var v = 0; v < size(pts); v += 1)
-                {
-                    if (v == h) continue;
-                    const dx = pts[v][0] - pts[h][0]; const dy = pts[v][1] - pts[h][1];
-                    const len = sqrt(dx * dx + dy * dy);
-                    if (len < 1e-6 || abs(dx) / len < sinVert) continue;   // skip self + vertical
-                    var d = atan2(dy, dx) / radian - gapMid;
-                    while (d > PI) d -= 2 * PI;
-                    while (d < -PI) d += 2 * PI;
-                    if (abs(d) > maxGap / 2) continue;  // direction not inside the empty side
-                    if (len < bestD) { bestD = len; best = v; }
-                }
-                if (best < 0) break;
-                var clear = true;
-                for (var t = 1; t <= 9; t += 1)
-                {
-                    const f = t / 10;
-                    const sp = [pts[h][0] + (pts[best][0] - pts[h][0]) * f,
-                                pts[h][1] + (pts[best][1] - pts[h][1]) * f];
-                    if (!inMaterial(poly, inners, sp)) { clear = false; break; }
-                }
-                if (!clear) break;
-                const bkey = min(h, best) ~ "_" ~ max(h, best);
-                if (edgeIdx[bkey] != undefined) break;   // already there -> avoid infinite loop
-                edgeIdx[bkey] = [min(h, best), max(h, best)];
-                incH[hk] = append(incH[hk], bkey);
-            }
-        }
-
-        // ----- 6b. force ONE connected rib network ------------------------
-        // Part Lightening fails ("results in more than one part") if the kept
-        // ribs (or any hole) form disconnected islands. Bridge every component
-        // to the rest with the shortest link, so the whole web is one piece and
-        // every hole is tied in.
+        // ----- 6b. reconnect into ONE part with real edges only -----------
+        // Part Lightening fails ("results in more than one part") if the ribs
+        // form disconnected islands. Reconnect ONLY by re-adding pooled Delaunay
+        // edges (which never cross other ribs and always meet at a point) --
+        // acute first, vertical next, tiny-pocket last. This keeps the whole
+        // network point-to-point with no rib-on-rib T-junctions.
         var par2 = [];
         for (var i = 0; i < size(pts); i += 1) par2 = append(par2, i);
         var inc = [];
@@ -520,39 +467,20 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             inc[ed[0]] = true; inc[ed[1]] = true;
             par2[ufFind(par2, ed[0])] = ufFind(par2, ed[1]);
         }
-        var must = [];
-        for (var i = 0; i < size(pts); i += 1)
-            if (inc[i] || i < nHole) must = append(must, i);
-        if (size(must) >= 2)
+        var pool = [];
+        for (var key in keys(removed))
         {
-            var guard = 0;
-            while (guard < 4000)
+            const e = removed[key];
+            pool = append(pool, [key, removedPri[key], pointDistance(pts[e[0]], pts[e[1]])]);
+        }
+        pool = sortPool(pool);
+        for (var pi = 0; pi < size(pool); pi += 1)
+        {
+            const key = pool[pi][0]; const e = removed[key];
+            if (ufFind(par2, e[0]) != ufFind(par2, e[1]))
             {
-                guard += 1;
-                const rootA = ufFind(par2, must[0]);
-                var allSame = true;
-                for (var mi = 1; mi < size(must); mi += 1)
-                    if (ufFind(par2, must[mi]) != rootA) { allSame = false; break; }
-                if (allSame) break;
-                var bU = -1; var bV = -1; var bD = 1e18;
-                for (var i1 = 0; i1 < size(must); i1 += 1)
-                {
-                    if (ufFind(par2, must[i1]) != rootA) continue;
-                    for (var i2 = 0; i2 < size(must); i2 += 1)
-                    {
-                        if (ufFind(par2, must[i2]) == rootA) continue;
-                        var dd = pointDistance(pts[must[i1]], pts[must[i2]]);
-                        const bdx = pts[must[i2]][0] - pts[must[i1]][0];
-                        const bdy = pts[must[i2]][1] - pts[must[i1]][1];
-                        const blen = sqrt(bdx * bdx + bdy * bdy);
-                        if (blen > 1e-6 && abs(bdx) / blen < sinVert) dd = dd * 100;   // avoid vertical bridges
-                        if (dd < bD) { bD = dd; bU = must[i1]; bV = must[i2]; }
-                    }
-                }
-                if (bU < 0) break;
-                const lo2 = min(bU, bV); const hi2 = max(bU, bV);
-                edgeIdx[lo2 ~ "_" ~ hi2] = [lo2, hi2];
-                par2[ufFind(par2, bU)] = ufFind(par2, bV);
+                edgeIdx[key] = e;
+                par2[ufFind(par2, e[0])] = ufFind(par2, e[1]);
             }
         }
 
@@ -694,14 +622,17 @@ function sortByLenAsc(arr is array) returns array
     return a;
 }
 
-function sortNums(arr is array) returns array
+function sortPool(arr is array) returns array
 {
     var a = arr;
     for (var i = 0; i < size(a); i += 1)
     {
         var mi = i;
         for (var j = i + 1; j < size(a); j += 1)
-            if (a[j] < a[mi]) mi = j;
+        {
+            const better = (a[j][1] < a[mi][1]) || (a[j][1] == a[mi][1] && a[j][2] < a[mi][2]);
+            if (better) mi = j;
+        }
         if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
     }
     return a;
