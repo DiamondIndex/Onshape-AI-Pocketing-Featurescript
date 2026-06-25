@@ -284,6 +284,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         }
         rim = dedupePoints(rim, 0.4 * s);
 
+        const rimStart = size(nodePts);
+        const rimEnd = rimStart + size(rim);   // pts[rimStart .. rimEnd-1] are rim points
         var pts = concatenateArrays([nodePts, rim]);
         if (size(pts) < 3)
             throw regenError("Plate too small for this triangle size.", ["triangleSize"]);
@@ -318,6 +320,13 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             pts = concatenateArrays([pts, addPts]);
         }
 
+        // Removed Delaunay edges are pooled so the network can be reconnected
+        // later using only real (non-crossing) edges -- never arbitrary struts.
+        // Priority: 0 = acute prune, 1 = vertical, 2 = tiny-pocket, 3 = rim-to-rim
+        // (all re-added last, only if needed, so the dropped pockets stay dropped).
+        var removed = {};
+        var removedPri = {};
+
         // ----- 6. Delaunay + keep in-material triangle edges --------------
         const triangles = bowyerWatson(pts);
         var edgeIdx = {};                      // "lo_hi" -> [lo, hi]
@@ -337,16 +346,15 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             {
                 const lo = min(e[k][0], e[k][1]);
                 const hi = max(e[k][0], e[k][1]);
+                if (lo >= rimStart && lo < rimEnd && hi >= rimStart && hi < rimEnd)
+                {   // rim-to-rim rib runs along the boundary and traps thin band
+                    // pockets against the wall -- pool it, don't draw it.
+                    removed[lo ~ "_" ~ hi] = [lo, hi]; removedPri[lo ~ "_" ~ hi] = 3;
+                    continue;
+                }
                 edgeIdx[lo ~ "_" ~ hi] = [lo, hi];
             }
         }
-
-        // Removed Delaunay edges are pooled so the network can be reconnected
-        // later using only real (non-crossing) edges -- never arbitrary struts.
-        // Priority: 0 = acute prune, 1 = vertical, 2 = tiny-pocket (re-added last
-        // so dissolved pockets stay dissolved).
-        var removed = {};
-        var removedPri = {};
 
         // ----- 6-merge: dissolve tiny pockets ------------------------------
         // A pocket whose incircle is smaller than this is a sliver; drop the
