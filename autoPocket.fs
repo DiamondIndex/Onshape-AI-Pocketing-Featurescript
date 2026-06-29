@@ -200,36 +200,41 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 bMinX = min(bMinX, pp[0]); bMaxX = max(bMaxX, pp[0]);
                 bMinY = min(bMinY, pp[1]); bMaxY = max(bMaxY, pp[1]);
             }
-            const holeMarginMm = definition.holeMargin / millimeter;
-            const jit = 0.18;
+            const jit = 0.32;
+            const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
 
-            // sites = hole centres + jittered lattice fill in open areas
+            // sites = square lattice ROTATED 45 deg (walls run ~45/135 deg, off
+            // horizontal/vertical) + hash jitter. Holes are NOT sites, so they
+            // land on cell walls (supported) instead of floating in cell centres.
             var sites = [];
-            for (var i = 0; i < size(holes); i += 1) sites = append(sites, holes[i]);
-            const rowH = s * sqrt(3) / 2;
-            var row = 0; var yy = bMinY;
-            while (yy <= bMaxY)
-            {
-                var xx = bMinX + ((row % 2 == 0) ? 0 : s / 2);
-                while (xx <= bMaxX)
+            const diag = sqrt((bMaxX - bMinX) * (bMaxX - bMinX) + (bMaxY - bMinY) * (bMaxY - bMinY));
+            const NN = ceil(diag / s) + 2;
+            var hidx = 0;
+            for (var gi = -NN; gi <= NN; gi += 1)
+                for (var gj = -NN; gj <= NN; gj += 1)
                 {
-                    const q = [xx + sin((xx * 1.7 + yy * 0.9) * radian) * s * jit,
-                               yy + cos((yy * 1.3 + xx * 0.7) * radian) * s * jit];
+                    hidx += 1;
+                    const lx = gi * s; const ly = gj * s;
+                    const rx = (lx - ly) * 0.7071068; const ry = (lx + ly) * 0.7071068;
+                    const e1 = sin((hidx * 12.9898 + 7.13) * radian) * 43758.5453;
+                    const e2 = sin(((hidx + 9173) * 12.9898 + 7.13) * radian) * 43758.5453;
+                    const j1 = e1 - floor(e1); const j2 = e2 - floor(e2);
+                    const q = [gcx + rx + (j1 - 0.5) * 2 * s * jit, gcy + ry + (j2 - 0.5) * 2 * s * jit];
+                    if (q[0] < bMinX || q[0] > bMaxX || q[1] < bMinY || q[1] > bMaxY) continue;
                     if (inMaterial(poly, inners, q) && distToPolygon(poly, q) >= marginMm
                             && distToInners(inners, q) >= marginMm)
                     {
                         var clear = true;
-                        for (var sp in sites) if (pointDistance(q, sp) < 0.75 * s) { clear = false; break; }
+                        for (var sp in sites) if (pointDistance(q, sp) < 0.7 * s) { clear = false; break; }
+                        if (clear)
+                            for (var hh = 0; hh < size(holes); hh += 1)
+                                if (pointDistance(q, holes[hh]) < 0.45 * s) { clear = false; break; }
                         if (clear) sites = append(sites, q);
                     }
-                    xx += s;
                 }
-                yy += rowH; row += 1;
-            }
             const nReal = size(sites);
 
             // guard ring far outside so real cells are all finite
-            const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
             const grad = max(bMaxX - bMinX, bMaxY - bMinY) * 2 + 200;
             for (var g = 0; g < 16; g += 1)
             {
@@ -278,11 +283,6 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                         if (t >= 0) ts = append(ts, t);
                     }
                 }
-                for (var hi = 0; hi < size(holes); hi += 1)
-                {
-                    const cts = apSegCircleT(w0, w1, holes[hi], hRad[hi] + holeMarginMm);
-                    for (var ci = 0; ci < size(cts); ci += 1) ts = append(ts, cts[ci]);
-                }
                 ts = apSortNums(ts);
                 for (var m = 0; m < size(ts) - 1; m += 1)
                 {
@@ -290,17 +290,31 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     if (tb - ta < 1e-4) continue;
                     const tm = (ta + tb) / 2;
                     const pm = [w0[0] + (w1[0] - w0[0]) * tm, w0[1] + (w1[1] - w0[1]) * tm];
-                    var ok = inMaterial(poly, inners, pm);
-                    if (ok)
-                        for (var hi = 0; hi < size(holes); hi += 1)
-                            if (pointDistance(pm, holes[hi]) < hRad[hi] + holeMarginMm) { ok = false; break; }
-                    if (ok)
+                    if (inMaterial(poly, inners, pm))
                     {
                         const pa = [w0[0] + (w1[0] - w0[0]) * ta, w0[1] + (w1[1] - w0[1]) * ta];
                         const pb = [w0[0] + (w1[0] - w0[0]) * tb, w0[1] + (w1[1] - w0[1]) * tb];
                         ribs = append(ribs, [pa, pb]);
                     }
                 }
+            }
+
+            // one connected network (Part Lightening needs a single part)
+            ribs = apConnectSegs(ribs);
+
+            // support every hole: if no rib already runs through it, add a short
+            // strut to the nearest wall (the part inside the hole is cut away).
+            for (var hh = 0; hh < size(holes); hh += 1)
+            {
+                const hc = holes[hh];
+                var best = 1e18; var bp = hc; var found = false;
+                for (var i = 0; i < size(ribs); i += 1)
+                {
+                    const pt = apClosestOnSeg(hc, ribs[i][0], ribs[i][1]);
+                    const dd = pointDistance(hc, pt);
+                    if (dd < best) { best = dd; bp = pt; found = true; }
+                }
+                if (found && best > hRad[hh] + 0.5) ribs = append(ribs, [hc, bp]);
             }
 
             const vSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
@@ -826,6 +840,63 @@ function apSegCircleT(p0 is array, p1 is array, c is array, rr) returns array
     if (t1 > 0 && t1 < 1) res = append(res, t1);
     if (t2 > 0 && t2 < 1) res = append(res, t2);
     return res;
+}
+
+function apClosestOnSeg(p is array, a is array, b is array) returns array
+{
+    const vx = b[0] - a[0]; const vy = b[1] - a[1];
+    const c1 = vx * (p[0] - a[0]) + vy * (p[1] - a[1]);
+    if (c1 <= 0) return a;
+    const c2 = vx * vx + vy * vy;
+    if (c2 <= c1) return b;
+    const t = c1 / c2;
+    return [a[0] + t * vx, a[1] + t * vy];
+}
+
+// merge disconnected wall islands into ONE network with shortest links
+function apConnectSegs(segs is array) returns array
+{
+    var nodes = []; var key2 = {}; var pairs = [];
+    for (var i = 0; i < size(segs); i += 1)
+    {
+        var ids = [];
+        for (var e = 0; e < 2; e += 1)
+        {
+            const pt = segs[i][e];
+            const kk = round(pt[0] / 0.8) ~ "_" ~ round(pt[1] / 0.8);
+            if (key2[kk] == undefined) { key2[kk] = size(nodes); nodes = append(nodes, pt); }
+            ids = append(ids, key2[kk]);
+        }
+        pairs = append(pairs, ids);
+    }
+    var par = [];
+    for (var i = 0; i < size(nodes); i += 1) par = append(par, i);
+    for (var i = 0; i < size(pairs); i += 1) par[ufFind(par, pairs[i][0])] = ufFind(par, pairs[i][1]);
+    var out = segs;
+    var guard = 0;
+    while (guard < 400)
+    {
+        guard += 1;
+        var roots = {}; var nr = 0;
+        for (var i = 0; i < size(nodes); i += 1)
+        {
+            const r = ufFind(par, i) ~ "";
+            if (roots[r] == undefined) { roots[r] = true; nr += 1; }
+        }
+        if (nr <= 1) break;
+        var best = 1e18; var bi = -1; var bj = -1;
+        for (var i = 0; i < size(nodes); i += 1)
+            for (var j = i + 1; j < size(nodes); j += 1)
+            {
+                if (ufFind(par, i) == ufFind(par, j)) continue;
+                const dd = pointDistance(nodes[i], nodes[j]);
+                if (dd < best) { best = dd; bi = i; bj = j; }
+            }
+        if (bi < 0) break;
+        out = append(out, [nodes[bi], nodes[bj]]);
+        par[ufFind(par, bi)] = ufFind(par, bj);
+    }
+    return out;
 }
 
 function apSortNums(arr is array) returns array
