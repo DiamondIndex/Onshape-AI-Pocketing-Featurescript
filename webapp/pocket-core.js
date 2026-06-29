@@ -533,23 +533,69 @@ function pcClipVoroSeg(p0, p1, poly, inners, holes, holeMargin) {
     return out;
 }
 
+function pcClosestOnSeg(p, a, b) {
+    var vx = b[0] - a[0], vy = b[1] - a[1];
+    var wx = p[0] - a[0], wy = p[1] - a[1];
+    var c1 = vx * wx + vy * wy;
+    if (c1 <= 0) return a;
+    var c2 = vx * vx + vy * vy;
+    if (c2 <= c1) return b;
+    var t = c1 / c2;
+    return [a[0] + t * vx, a[1] + t * vy];
+}
+
+// merge any disconnected wall islands into ONE network (shortest links).
+function pcConnectVoroSegs(segs) {
+    var nodes = [], key2idx = {};
+    function nidx(p) {
+        var k = Math.round(p[0] / 0.8) + "_" + Math.round(p[1] / 0.8);
+        if (key2idx[k] === undefined) { key2idx[k] = nodes.length; nodes.push(p); }
+        return key2idx[k];
+    }
+    var pairs = [];
+    for (var i = 0; i < segs.length; i += 1) pairs.push([nidx(segs[i][0]), nidx(segs[i][1])]);
+    var parent = [];
+    for (var i = 0; i < nodes.length; i += 1) parent.push(i);
+    function find(a) { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; }
+    for (var i = 0; i < pairs.length; i += 1) parent[find(pairs[i][0])] = find(pairs[i][1]);
+    var out = segs.slice();
+    var guard = 0;
+    while (guard++ < 400) {
+        var roots = {};
+        for (var i = 0; i < nodes.length; i += 1) roots[find(i)] = true;
+        if (Object.keys(roots).length <= 1) break;
+        var best = 1e18, bi = -1, bj = -1;
+        for (var i = 0; i < nodes.length; i += 1) {
+            for (var j = i + 1; j < nodes.length; j += 1) {
+                if (find(i) === find(j)) continue;
+                var dd = pcDist(nodes[i], nodes[j]);
+                if (dd < best) { best = dd; bi = i; bj = j; }
+            }
+        }
+        if (bi < 0) break;
+        out.push([nodes[bi], nodes[bj]]);
+        parent[find(bi)] = find(bj);
+    }
+    return out;
+}
+
 function pcGenerateVoronoi(plate, params) {
     var poly = plate.outline;
     var inners = plate.inners || [];
     var s = params.triangleSize;
     var minR = (params.minHoleDia || 0) / 2;
     var marginMm = params.edgeMargin || 6;
-    var holeMargin = params.holeMargin || 0;
-    var jitter = (params.jitter === undefined) ? 0.18 : params.jitter;
+    var jitter = (params.jitter === undefined) ? 0.32 : params.jitter;
+    var relax = (params.relax === undefined) ? 0 : params.relax;
+    // deterministic hash-based "random" in [0,1)
+    function hash(i) { var x = Math.sin(i * 12.9898 + 7.13) * 43758.5453; return x - Math.floor(x); }
 
-    // 1. filter holes
     var holes = [];
     for (var i = 0; i < plate.holes.length; i += 1) {
         if (plate.holes[i].r < minR) continue;
         holes.push(plate.holes[i]);
     }
 
-    // bbox
     var minX = poly[0][0], maxX = poly[0][0], minY = poly[0][1], maxY = poly[0][1];
     for (var p = 1; p < poly.length; p += 1) {
         if (poly[p][0] < minX) minX = poly[p][0];
@@ -557,44 +603,65 @@ function pcGenerateVoronoi(plate, params) {
         if (poly[p][1] < minY) minY = poly[p][1];
         if (poly[p][1] > maxY) maxY = poly[p][1];
     }
+    var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    var rad = Math.max(maxX - minX, maxY - minY) * 2 + 200;
+    function guardRing() {
+        var g = [];
+        for (var k = 0; k < 16; k += 1) { var a = k / 16 * 2 * Math.PI; g.push([cx + Math.cos(a) * rad, cy + Math.sin(a) * rad]); }
+        return g;
+    }
 
-    // 2. sites = hole centres + jittered lattice fill in open areas
+    // 1. sites = jittered lattice ONLY (holes are NOT sites, so they can land on
+    //    cell walls / junctions instead of floating in cell centres). Keep sites
+    //    off the holes so holes fall on the boundaries between cells.
     var sites = [];
-    for (var i = 0; i < holes.length; i += 1) sites.push([holes[i].x, holes[i].y]);
-    var rowH = s * Math.sqrt(3) / 2;
-    var row = 0;
-    for (var y = minY; y <= maxY; y += rowH) {
-        var xoff = (row % 2 === 0) ? 0 : s / 2;
-        for (var x = minX + xoff; x <= maxX; x += s) {
-            var q = [x + Math.sin(x * 1.7 + y * 0.9) * s * jitter,
-                     y + Math.cos(y * 1.3 + x * 0.7) * s * jitter];
+    // square lattice ROTATED 45 deg -> Voronoi walls run at ~45/135 deg
+    // (maximally far from horizontal and vertical), then jittered for variation.
+    var cxg = (minX + maxX) / 2, cyg = (minY + maxY) / 2;
+    var diag = Math.sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
+    var N = Math.ceil(diag / s) + 2, hidx = 0;
+    for (var gi = -N; gi <= N; gi += 1) {
+        for (var gj = -N; gj <= N; gj += 1) {
+            hidx += 1;
+            var lx = gi * s, ly = gj * s;
+            var rx = (lx - ly) * 0.7071068, ry = (lx + ly) * 0.7071068;
+            var q = [cxg + rx + (hash(hidx) - 0.5) * 2 * s * jitter,
+                     cyg + ry + (hash(hidx + 9173) - 0.5) * 2 * s * jitter];
+            if (q[0] < minX || q[0] > maxX || q[1] < minY || q[1] > maxY) continue;
             if (pcInMaterial(poly, inners, q) && pcDistToPolygon(poly, q) >= marginMm
                     && pcDistToInners(inners, q) >= marginMm) {
                 var clear = true;
-                for (var k = 0; k < sites.length; k += 1) {
-                    if (pcDist(q, sites[k]) < 0.75 * s) { clear = false; break; }
-                }
+                for (var k = 0; k < sites.length; k += 1) { if (pcDist(q, sites[k]) < 0.7 * s) { clear = false; break; } }
+                if (clear) for (var h = 0; h < holes.length; h += 1) { if (pcDist(q, [holes[h].x, holes[h].y]) < 0.45 * s) { clear = false; break; } }
                 if (clear) sites.push(q);
             }
         }
-        row += 1;
     }
     var nReal = sites.length;
 
-    // 3. guard ring far outside so the real cells are all finite
-    var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    var rad = Math.max(maxX - minX, maxY - minY) * 2 + 200;
-    for (var g = 0; g < 16; g += 1) {
-        var ang = g / 16 * 2 * Math.PI;
-        sites.push([cx + Math.cos(ang) * rad, cy + Math.sin(ang) * rad]);
+    // 2. Lloyd relaxation -> organic blue-noise cells (no straight rows/columns)
+    for (var it = 0; it < relax; it += 1) {
+        var all0 = sites.concat(guardRing());
+        var tg = pcBowyerWatson(all0);
+        var ax = [], ay = [], cn = [];
+        for (var i = 0; i < nReal; i += 1) { ax.push(0); ay.push(0); cn.push(0); }
+        for (var t = 0; t < tg.length; t += 1) {
+            var tr = tg[t];
+            var c = pcCircumcenter(all0[tr[0]], all0[tr[1]], all0[tr[2]]);
+            for (var j = 0; j < 3; j += 1) { var vi = tr[j]; if (vi < nReal) { ax[vi] += c[0]; ay[vi] += c[1]; cn[vi] += 1; } }
+        }
+        for (var i = 0; i < nReal; i += 1) {
+            if (cn[i] === 0) continue;
+            var np = [ax[i] / cn[i], ay[i] / cn[i]];
+            if (pcInMaterial(poly, inners, np) && pcDistToPolygon(poly, np) >= marginMm * 0.5) sites[i] = np;
+        }
     }
 
-    // 4. Delaunay -> circumcenters -> Voronoi walls (unique per Delaunay edge)
-    var tris = pcBowyerWatson(sites);
+    // 3. final Voronoi: circumcenters -> wall per shared Delaunay edge
+    var all = sites.concat(guardRing());
+    var tris = pcBowyerWatson(all);
     var cc = [];
-    for (var t = 0; t < tris.length; t += 1) {
-        cc.push(pcCircumcenter(sites[tris[t][0]], sites[tris[t][1]], sites[tris[t][2]]));
-    }
+    for (var t = 0; t < tris.length; t += 1) cc.push(pcCircumcenter(all[tris[t][0]], all[tris[t][1]], all[tris[t][2]]));
     var emap = {};
     for (var t = 0; t < tris.length; t += 1) {
         var tr = tris[t];
@@ -607,14 +674,32 @@ function pcGenerateVoronoi(plate, params) {
         }
     }
 
-    // 5. clip every wall to material
+    // 4. walls clipped to BOUNDARY ONLY (not holes) -> ribs run through holes
     var segs = [];
     for (var key in emap) {
         if (!emap.hasOwnProperty(key)) continue;
         var ts2 = emap[key];
-        if (ts2.length !== 2) continue;             // boundary/guard wall -> skip
-        var clipped = pcClipVoroSeg(cc[ts2[0]], cc[ts2[1]], poly, inners, holes, holeMargin);
+        if (ts2.length !== 2) continue;
+        var clipped = pcClipVoroSeg(cc[ts2[0]], cc[ts2[1]], poly, inners, [], 0);
         for (var c = 0; c < clipped.length; c += 1) segs.push(clipped[c]);
+    }
+
+    // 5. one connected network (bridge islands)
+    segs = pcConnectVoroSegs(segs);
+
+    // 6. support every hole: if no rib passes through it, add a short strut to
+    //    the nearest wall (the part inside the hole is cut away, leaving a rib
+    //    from the hole edge to the web).
+    var struts = 0;
+    for (var h = 0; h < holes.length; h += 1) {
+        var hc = [holes[h].x, holes[h].y];
+        var best = 1e18, bp = null;
+        for (var i = 0; i < segs.length; i += 1) {
+            var pt = pcClosestOnSeg(hc, segs[i][0], segs[i][1]);
+            var dd = pcDist(hc, pt);
+            if (dd < best) { best = dd; bp = pt; }
+        }
+        if (bp && best > holes[h].r + 0.5) { segs.push([hc, bp]); struts += 1; }
     }
 
     return {
@@ -623,7 +708,7 @@ function pcGenerateVoronoi(plate, params) {
         holes: holes,
         vertices: [], nNodes: 0, edges: [], triangles: [],
         pockets: [], bosses: [], struts: [],
-        info: { holes: holes.length, holesUsed: nReal, struts: 0,
+        info: { holes: holes.length, holesUsed: nReal, struts: struts,
                 ribs: segs.length, pockets: 0 }
     };
 }
