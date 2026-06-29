@@ -55,6 +55,8 @@ export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
 
 export const REFINE_BOUNDS = { (unitless) : [1.0, 1.5, 4.0] } as RealBoundSpec;
 
+export const CELLJIT_BOUNDS = { (unitless) : [0.0, 0.32, 0.6] } as RealBoundSpec;
+
 // ----- feature --------------------------------------------------------------
 
 annotation { "Feature Type Name" : "Auto Pocket" }
@@ -107,6 +109,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Voronoi cells (looks)" }
         definition.voronoi is boolean;
+
+        annotation { "Name" : "Cell jitter (Voronoi)" }
+        isReal(definition.cellJitter, CELLJIT_BOUNDS);
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -201,7 +206,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 bMinY = min(bMinY, pp[1]); bMaxY = max(bMaxY, pp[1]);
             }
             const holeMarginMm = definition.holeMargin / millimeter;
-            const jit = 0.32;
+            const jit = definition.cellJitter;
             const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
 
             // sites = square lattice ROTATED 45 deg (walls run ~45/135 deg, off
@@ -229,7 +234,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                         for (var sp in sites) if (pointDistance(q, sp) < 0.7 * s) { clear = false; break; }
                         if (clear)
                             for (var hh = 0; hh < size(holes); hh += 1)
-                                if (pointDistance(q, holes[hh]) < 0.45 * s) { clear = false; break; }
+                                if (pointDistance(q, holes[hh]) < hRad[hh] + 0.25 * s) { clear = false; break; }
                         if (clear) sites = append(sites, q);
                     }
                 }
@@ -304,7 +309,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     {
                         const pa = [w0[0] + (w1[0] - w0[0]) * ta, w0[1] + (w1[1] - w0[1]) * ta];
                         const pb = [w0[0] + (w1[0] - w0[0]) * tb, w0[1] + (w1[1] - w0[1]) * tb];
-                        ribs = append(ribs, [pa, pb]);
+                        if (pointDistance(pa, pb) >= 0.22 * s)   // drop tiny slivers (micro pockets)
+                            ribs = append(ribs, [pa, pb]);
                     }
                 }
             }
