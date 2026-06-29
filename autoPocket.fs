@@ -313,19 +313,61 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             // any rib islands left isolated by hole cuts, routing in material.
             ribs = apConnectSegs(ribs, poly, inners, holes, hRad);
 
-            // support every hole: if no rib already runs through it, add a short
-            // strut to the nearest wall (the part inside the hole is cut away).
+            // brace every hole on BOTH sides: while a hole's nearby ribs leave an
+            // angular gap wider than 180 deg, add a strut to the nearest wall in
+            // the empty direction (cut away inside the hole -> supports its edge).
             for (var hh = 0; hh < size(holes); hh += 1)
             {
                 const hc = holes[hh];
-                var best = 1e18; var bp = hc; var found = false;
-                for (var i = 0; i < size(ribs); i += 1)
+                const rr = hRad[hh] + holeMarginMm;
+                var tries = 0;
+                while (tries < 4)
                 {
-                    const pt = apClosestOnSeg(hc, ribs[i][0], ribs[i][1]);
-                    const dd = pointDistance(hc, pt);
-                    if (dd < best) { best = dd; bp = pt; found = true; }
+                    tries += 1;
+                    var angs = [];
+                    for (var i = 0; i < size(ribs); i += 1)
+                    {
+                        const pt = apClosestOnSeg(hc, ribs[i][0], ribs[i][1]);
+                        if (pointDistance(hc, pt) < rr + 0.7 * s)
+                            angs = append(angs, atan2(pt[1] - hc[1], pt[0] - hc[0]) / radian);
+                    }
+                    var gapMid = 0.0; var doAdd = false;
+                    if (size(angs) == 0) { doAdd = true; }
+                    else
+                    {
+                        angs = apSortNums(angs);
+                        var maxGap = -1.0;
+                        for (var gi = 0; gi < size(angs); gi += 1)
+                        {
+                            const a0 = angs[gi];
+                            const a1 = (gi + 1 < size(angs)) ? angs[gi + 1] : angs[0] + 2 * PI;
+                            if (a1 - a0 > maxGap) { maxGap = a1 - a0; gapMid = (a0 + a1) / 2; }
+                        }
+                        if (maxGap > PI) doAdd = true;
+                    }
+                    if (!doAdd) break;
+                    var best = 1e18; var bp = hc; var found = false;
+                    for (var i = 0; i < size(ribs); i += 1)
+                    {
+                        const pt = apClosestOnSeg(hc, ribs[i][0], ribs[i][1]);
+                        if (size(angs) > 0)
+                        {
+                            var d = atan2(pt[1] - hc[1], pt[0] - hc[0]) / radian - gapMid;
+                            while (d > PI) d -= 2 * PI;
+                            while (d < -PI) d += 2 * PI;
+                            if (abs(d) > PI / 2) continue;        // only walls in the empty half
+                        }
+                        const dd = pointDistance(hc, pt);
+                        if (dd > rr + 0.5 && dd < best) { best = dd; bp = pt; found = true; }
+                    }
+                    if (!found) break;
+                    const ux = bp[0] - hc[0]; const uy = bp[1] - hc[1];
+                    const ul = sqrt(ux * ux + uy * uy);
+                    if (ul < 1e-6) break;
+                    const he = [hc[0] + ux / ul * rr, hc[1] + uy / ul * rr];
+                    if (apSegInMaterial(he, bp, poly, inners, holes, hRad)) ribs = append(ribs, [hc, bp]);
+                    else break;
                 }
-                if (found && best > hRad[hh] + holeMarginMm + 1.0) ribs = append(ribs, [hc, bp]);
             }
 
             const vSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
