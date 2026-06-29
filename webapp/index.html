@@ -50,6 +50,8 @@
     <div class="row"><label>Hole material</label><input type="range" id="hm" min="0" max="15" step="0.5" value="3"><output id="hmV"></output></div>
     <div class="row"><label>Edge margin</label><input type="range" id="em" min="0" max="15" step="0.5" value="6"><output id="emV"></output></div>
     <div class="chk"><input type="checkbox" id="gf" checked><label for="gf">Even spacing (uniform areas)</label></div>
+    <div class="chk"><input type="checkbox" id="voro"><label for="voro">Voronoi cells (looks)</label></div>
+    <div class="row"><label>Cell jitter</label><input type="range" id="jit" min="0" max="40" step="1" value="18"><output id="jitV"></output></div>
 
     <h2>View</h2>
     <div class="chk"><input type="checkbox" id="showRibs" checked><label for="showRibs">Rib centrelines</label></div>
@@ -93,7 +95,8 @@ function params() {
     pocketFillet: +P("fl").value,
     holeMargin: +P("hm").value,
     edgeMargin: +P("em").value,
-    gapFill: P("gf").checked
+    gapFill: P("gf").checked,
+    jitter: +P("jit").value / 100
   };
 }
 
@@ -106,6 +109,7 @@ function syncLabels(){
   P("flV").textContent = P("fl").value;
   P("hmV").textContent = P("hm").value;
   P("emV").textContent = P("em").value;
+  P("jitV").textContent = P("jit").value;
   P("refOpV").textContent = P("refOp").value;
   P("refScV").textContent = P("refSc").value;
   P("refXV").textContent = P("refX").value;
@@ -205,6 +209,18 @@ function draw(){
     for(var v=0;v<result.nNodes;v++){ var pv=result.vertices[v]; ctx.beginPath(); ctx.arc(sx(pv[0]),sy(pv[1]),1.6,0,7); ctx.fill(); }
   }
 
+  // Voronoi rib walls (drawn thick like ribs)
+  if(result && result.segs && result.segs.length && P("showRibs").checked){
+    ctx.strokeStyle = "#c8a24a"; ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(1, +P("rw").value * T.sc);
+    ctx.beginPath();
+    for(var sg=0; sg<result.segs.length; sg++){
+      var a=result.segs[sg][0], b=result.segs[sg][1];
+      ctx.moveTo(sx(a[0]),sy(a[1])); ctx.lineTo(sx(b[0]),sy(b[1]));
+    }
+    ctx.stroke(); ctx.lineCap = "butt";
+  }
+
   // outline stroke
   if(plate.outline.length){ polyPath(plate.outline); ctx.strokeStyle="#111"; ctx.lineWidth=1.5; ctx.stroke(); }
 }
@@ -214,7 +230,7 @@ function run(){
   if(!plate){ draw(); return; }
   try {
     var t0 = performance.now();
-    result = pcGenerate(plate, params());
+    result = P("voro").checked ? pcGenerateVoronoi(plate, params()) : pcGenerate(plate, params());
     var t1 = performance.now();
     P("info").textContent =
       "holes (input): "+plate.holes.length+"\n"+
@@ -247,7 +263,8 @@ function loadSample(){
 
 // ---- wiring ----
 ctrls.forEach(function(id){ P(id).addEventListener("input", run); });
-["gf","showRibs","showPockets","showHoles"].forEach(function(id){ P(id).addEventListener("change", run); });
+["gf","voro","showRibs","showPockets","showHoles"].forEach(function(id){ P(id).addEventListener("change", run); });
+P("jit").addEventListener("input", run);
 ["refOp","refSc","refX","refY"].forEach(function(id){ P(id).addEventListener("input", function(){ syncLabels(); draw(); }); });
 
 P("dxf").addEventListener("change", function(e){

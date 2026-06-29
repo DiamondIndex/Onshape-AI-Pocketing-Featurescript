@@ -446,7 +446,190 @@ function pcGenerate(plate, params) {
     };
 }
 
+/* ============================================================================
+ * VORONOI pocketing  —  the "looks" version.
+ * Ribs run along Voronoi cell walls (the dual of the Delaunay we already build):
+ * each Delaunay triangle has a circumcenter, and the wall between two adjacent
+ * sites is the segment joining the circumcenters of the two triangles sharing
+ * that Delaunay edge. Cells are clipped to the plate material.
+ * ==========================================================================*/
+
+function pcCircumcenter(A, B, C) {
+    var ax = A[0], ay = A[1], bx = B[0], by = B[1], cx = C[0], cy = C[1];
+    var d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (Math.abs(d) < 1e-12) return [(ax + bx + cx) / 3, (ay + by + cy) / 3];
+    var a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx * cx + cy * cy;
+    var ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+    var uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+    return [ux, uy];
+}
+
+// intersection parameter t in [0,1] along p0->p1 where it crosses q0-q1, else -1
+function pcSegInterT(p0, p1, q0, q1) {
+    var r0 = p1[0] - p0[0], r1 = p1[1] - p0[1];
+    var s0 = q1[0] - q0[0], s1 = q1[1] - q0[1];
+    var den = r0 * s1 - r1 * s0;
+    if (Math.abs(den) < 1e-12) return -1;
+    var qpx = q0[0] - p0[0], qpy = q0[1] - p0[1];
+    var t = (qpx * s1 - qpy * s0) / den;
+    var u = (qpx * r1 - qpy * r0) / den;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return t;
+    return -1;
+}
+
+function pcSegCircleT(p0, p1, c, rr, out) {
+    var dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+    var fx = p0[0] - c[0], fy = p0[1] - c[1];
+    var a = dx * dx + dy * dy;
+    if (a < 1e-12) return;
+    var b = 2 * (fx * dx + fy * dy);
+    var cc = fx * fx + fy * fy - rr * rr;
+    var disc = b * b - 4 * a * cc;
+    if (disc < 0) return;
+    disc = Math.sqrt(disc);
+    var t1 = (-b - disc) / (2 * a), t2 = (-b + disc) / (2 * a);
+    if (t1 > 0 && t1 < 1) out.push(t1);
+    if (t2 > 0 && t2 < 1) out.push(t2);
+}
+
+function pcVoroMaterialOK(p, poly, inners, holes, holeMargin) {
+    if (!pcInMaterial(poly, inners, p)) return false;
+    for (var i = 0; i < holes.length; i += 1) {
+        if (pcDist(p, [holes[i].x, holes[i].y]) < holes[i].r + holeMargin) return false;
+    }
+    return true;
+}
+
+// clip a rib segment to material: cut at outline / inner / hole-keepout crossings,
+// keep sub-segments whose midpoint is solid material outside every hole.
+function pcClipVoroSeg(p0, p1, poly, inners, holes, holeMargin) {
+    var ts = [0, 1];
+    for (var i = 0; i < poly.length; i += 1) {
+        var t = pcSegInterT(p0, p1, poly[i], poly[(i + 1) % poly.length]);
+        if (t >= 0) ts.push(t);
+    }
+    for (var k = 0; k < inners.length; k += 1) {
+        var inn = inners[k];
+        for (var j = 0; j < inn.length; j += 1) {
+            var t2 = pcSegInterT(p0, p1, inn[j], inn[(j + 1) % inn.length]);
+            if (t2 >= 0) ts.push(t2);
+        }
+    }
+    for (var h = 0; h < holes.length; h += 1) {
+        pcSegCircleT(p0, p1, [holes[h].x, holes[h].y], holes[h].r + holeMargin, ts);
+    }
+    ts.sort(function (a, b) { return a - b; });
+    var out = [];
+    for (var m = 0; m < ts.length - 1; m += 1) {
+        var ta = ts[m], tb = ts[m + 1];
+        if (tb - ta < 1e-4) continue;
+        var tm = (ta + tb) / 2;
+        var pm = [p0[0] + (p1[0] - p0[0]) * tm, p0[1] + (p1[1] - p0[1]) * tm];
+        if (pcVoroMaterialOK(pm, poly, inners, holes, holeMargin)) {
+            out.push([[p0[0] + (p1[0] - p0[0]) * ta, p0[1] + (p1[1] - p0[1]) * ta],
+                      [p0[0] + (p1[0] - p0[0]) * tb, p0[1] + (p1[1] - p0[1]) * tb]]);
+        }
+    }
+    return out;
+}
+
+function pcGenerateVoronoi(plate, params) {
+    var poly = plate.outline;
+    var inners = plate.inners || [];
+    var s = params.triangleSize;
+    var minR = (params.minHoleDia || 0) / 2;
+    var marginMm = params.edgeMargin || 6;
+    var holeMargin = params.holeMargin || 0;
+    var jitter = (params.jitter === undefined) ? 0.18 : params.jitter;
+
+    // 1. filter holes
+    var holes = [];
+    for (var i = 0; i < plate.holes.length; i += 1) {
+        if (plate.holes[i].r < minR) continue;
+        holes.push(plate.holes[i]);
+    }
+
+    // bbox
+    var minX = poly[0][0], maxX = poly[0][0], minY = poly[0][1], maxY = poly[0][1];
+    for (var p = 1; p < poly.length; p += 1) {
+        if (poly[p][0] < minX) minX = poly[p][0];
+        if (poly[p][0] > maxX) maxX = poly[p][0];
+        if (poly[p][1] < minY) minY = poly[p][1];
+        if (poly[p][1] > maxY) maxY = poly[p][1];
+    }
+
+    // 2. sites = hole centres + jittered lattice fill in open areas
+    var sites = [];
+    for (var i = 0; i < holes.length; i += 1) sites.push([holes[i].x, holes[i].y]);
+    var rowH = s * Math.sqrt(3) / 2;
+    var row = 0;
+    for (var y = minY; y <= maxY; y += rowH) {
+        var xoff = (row % 2 === 0) ? 0 : s / 2;
+        for (var x = minX + xoff; x <= maxX; x += s) {
+            var q = [x + Math.sin(x * 1.7 + y * 0.9) * s * jitter,
+                     y + Math.cos(y * 1.3 + x * 0.7) * s * jitter];
+            if (pcInMaterial(poly, inners, q) && pcDistToPolygon(poly, q) >= marginMm
+                    && pcDistToInners(inners, q) >= marginMm) {
+                var clear = true;
+                for (var k = 0; k < sites.length; k += 1) {
+                    if (pcDist(q, sites[k]) < 0.75 * s) { clear = false; break; }
+                }
+                if (clear) sites.push(q);
+            }
+        }
+        row += 1;
+    }
+    var nReal = sites.length;
+
+    // 3. guard ring far outside so the real cells are all finite
+    var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    var rad = Math.max(maxX - minX, maxY - minY) * 2 + 200;
+    for (var g = 0; g < 16; g += 1) {
+        var ang = g / 16 * 2 * Math.PI;
+        sites.push([cx + Math.cos(ang) * rad, cy + Math.sin(ang) * rad]);
+    }
+
+    // 4. Delaunay -> circumcenters -> Voronoi walls (unique per Delaunay edge)
+    var tris = pcBowyerWatson(sites);
+    var cc = [];
+    for (var t = 0; t < tris.length; t += 1) {
+        cc.push(pcCircumcenter(sites[tris[t][0]], sites[tris[t][1]], sites[tris[t][2]]));
+    }
+    var emap = {};
+    for (var t = 0; t < tris.length; t += 1) {
+        var tr = tris[t];
+        var te = [[tr[0], tr[1]], [tr[1], tr[2]], [tr[2], tr[0]]];
+        for (var e = 0; e < 3; e += 1) {
+            var a = Math.min(te[e][0], te[e][1]), b = Math.max(te[e][0], te[e][1]);
+            var key = a + "_" + b;
+            if (!emap[key]) emap[key] = [];
+            emap[key].push(t);
+        }
+    }
+
+    // 5. clip every wall to material
+    var segs = [];
+    for (var key in emap) {
+        if (!emap.hasOwnProperty(key)) continue;
+        var ts2 = emap[key];
+        if (ts2.length !== 2) continue;             // boundary/guard wall -> skip
+        var clipped = pcClipVoroSeg(cc[ts2[0]], cc[ts2[1]], poly, inners, holes, holeMargin);
+        for (var c = 0; c < clipped.length; c += 1) segs.push(clipped[c]);
+    }
+
+    return {
+        segs: segs,
+        sites: sites.slice(0, nReal),
+        holes: holes,
+        vertices: [], nNodes: 0, edges: [], triangles: [],
+        pockets: [], bosses: [], struts: [],
+        info: { holes: holes.length, holesUsed: nReal, struts: 0,
+                ribs: segs.length, pockets: 0 }
+    };
+}
+
 // expose for both browser (window) and node-ish
 if (typeof window !== "undefined") {
     window.pcGenerate = pcGenerate;
+    window.pcGenerateVoronoi = pcGenerateVoronoi;
 }

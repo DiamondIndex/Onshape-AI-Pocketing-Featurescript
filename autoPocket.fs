@@ -104,6 +104,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Equilateral triangles only" }
         definition.equilateral is boolean;
+
+        annotation { "Name" : "Voronoi cells (looks)" }
+        definition.voronoi is boolean;
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -182,6 +185,138 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             for (var j = 0; j < size(holes); j += 1)
                 if (pointDistance(holePts[i], holes[j]) < 1.0) { dup = true; break; }
             if (!dup) { holes = append(holes, holePts[i]); hRad = append(hRad, holeRadii[i]); }
+        }
+
+        // ===== VORONOI MODE (looks) =======================================
+        // Ribs run along Voronoi cell walls (dual of the Delaunay): connect the
+        // circumcenters of triangles sharing a Delaunay edge, then clip to the
+        // plate material. Produces the organic cellular lightening look.
+        if (definition.voronoi)
+        {
+            var bMinX = poly[0][0]; var bMaxX = poly[0][0];
+            var bMinY = poly[0][1]; var bMaxY = poly[0][1];
+            for (var pp in poly)
+            {
+                bMinX = min(bMinX, pp[0]); bMaxX = max(bMaxX, pp[0]);
+                bMinY = min(bMinY, pp[1]); bMaxY = max(bMaxY, pp[1]);
+            }
+            const holeMarginMm = definition.holeMargin / millimeter;
+            const jit = 0.18;
+
+            // sites = hole centres + jittered lattice fill in open areas
+            var sites = [];
+            for (var i = 0; i < size(holes); i += 1) sites = append(sites, holes[i]);
+            const rowH = s * sqrt(3) / 2;
+            var row = 0; var yy = bMinY;
+            while (yy <= bMaxY)
+            {
+                var xx = bMinX + ((row % 2 == 0) ? 0 : s / 2);
+                while (xx <= bMaxX)
+                {
+                    const q = [xx + sin((xx * 1.7 + yy * 0.9) * radian) * s * jit,
+                               yy + cos((yy * 1.3 + xx * 0.7) * radian) * s * jit];
+                    if (inMaterial(poly, inners, q) && distToPolygon(poly, q) >= marginMm
+                            && distToInners(inners, q) >= marginMm)
+                    {
+                        var clear = true;
+                        for (var sp in sites) if (pointDistance(q, sp) < 0.75 * s) { clear = false; break; }
+                        if (clear) sites = append(sites, q);
+                    }
+                    xx += s;
+                }
+                yy += rowH; row += 1;
+            }
+            const nReal = size(sites);
+
+            // guard ring far outside so real cells are all finite
+            const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
+            const grad = max(bMaxX - bMinX, bMaxY - bMinY) * 2 + 200;
+            for (var g = 0; g < 16; g += 1)
+            {
+                const ga = (g / 16 * 2 * PI) * radian;
+                sites = append(sites, [gcx + cos(ga) * grad, gcy + sin(ga) * grad]);
+            }
+
+            // Delaunay -> circumcenters -> wall per shared Delaunay edge
+            const vtris = bowyerWatson(sites);
+            var cc = [];
+            for (var t = 0; t < size(vtris); t += 1)
+                cc = append(cc, apCircumcenter(sites[vtris[t][0]], sites[vtris[t][1]], sites[vtris[t][2]]));
+            var emap = {};
+            for (var t = 0; t < size(vtris); t += 1)
+            {
+                const tr = vtris[t];
+                const te = [[tr[0], tr[1]], [tr[1], tr[2]], [tr[2], tr[0]]];
+                for (var e = 0; e < 3; e += 1)
+                {
+                    const a = min(te[e][0], te[e][1]); const b = max(te[e][0], te[e][1]);
+                    const k = a ~ "_" ~ b;
+                    if (emap[k] == undefined) emap[k] = [];
+                    emap[k] = append(emap[k], t);
+                }
+            }
+
+            // clip each wall to material (outline / inners / hole keep-outs)
+            var ribs = [];
+            for (var key in keys(emap))
+            {
+                const arr = emap[key];
+                if (size(arr) != 2) continue;
+                const w0 = cc[arr[0]]; const w1 = cc[arr[1]];
+                var ts = [0.0, 1.0];
+                for (var i = 0; i < size(poly); i += 1)
+                {
+                    const t = apSegT(w0, w1, poly[i], poly[(i + 1) % size(poly)]);
+                    if (t >= 0) ts = append(ts, t);
+                }
+                for (var ki = 0; ki < size(inners); ki += 1)
+                {
+                    const inn = inners[ki];
+                    for (var i = 0; i < size(inn); i += 1)
+                    {
+                        const t = apSegT(w0, w1, inn[i], inn[(i + 1) % size(inn)]);
+                        if (t >= 0) ts = append(ts, t);
+                    }
+                }
+                for (var hi = 0; hi < size(holes); hi += 1)
+                {
+                    const cts = apSegCircleT(w0, w1, holes[hi], hRad[hi] + holeMarginMm);
+                    for (var ci = 0; ci < size(cts); ci += 1) ts = append(ts, cts[ci]);
+                }
+                ts = apSortNums(ts);
+                for (var m = 0; m < size(ts) - 1; m += 1)
+                {
+                    const ta = ts[m]; const tb = ts[m + 1];
+                    if (tb - ta < 1e-4) continue;
+                    const tm = (ta + tb) / 2;
+                    const pm = [w0[0] + (w1[0] - w0[0]) * tm, w0[1] + (w1[1] - w0[1]) * tm];
+                    var ok = inMaterial(poly, inners, pm);
+                    if (ok)
+                        for (var hi = 0; hi < size(holes); hi += 1)
+                            if (pointDistance(pm, holes[hi]) < hRad[hi] + holeMarginMm) { ok = false; break; }
+                    if (ok)
+                    {
+                        const pa = [w0[0] + (w1[0] - w0[0]) * ta, w0[1] + (w1[1] - w0[1]) * ta];
+                        const pb = [w0[0] + (w1[0] - w0[0]) * tb, w0[1] + (w1[1] - w0[1]) * tb];
+                        ribs = append(ribs, [pa, pb]);
+                    }
+                }
+            }
+
+            const vSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
+            var ri = 0;
+            for (var rib in ribs)
+            {
+                const a = rib[0]; const b = rib[1];
+                if (pointDistance(a, b) < 1e-6) continue;
+                skLineSegment(vSketch, "rib" ~ ri, {
+                            "start" : vector(a[0] * millimeter, a[1] * millimeter),
+                            "end"   : vector(b[0] * millimeter, b[1] * millimeter) });
+                ri += 1;
+            }
+            skSolve(vSketch);
+            reportFeatureInfo(context, id, "Voronoi: " ~ nReal ~ " cells, " ~ ri ~ " rib segments.");
+            return;
         }
 
         // ----- 3. merge very-close holes (union-find) ---------------------
@@ -643,6 +778,63 @@ function sortByLenAsc(arr is array) returns array
         var mi = i;
         for (var j = i + 1; j < size(a); j += 1)
             if (a[j][3] < a[mi][3]) mi = j;
+        if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
+    }
+    return a;
+}
+
+function apCircumcenter(A is array, B is array, C is array) returns array
+{
+    const d = 2 * (A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]));
+    if (abs(d) < 1e-9)
+        return [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+    const a2 = A[0] * A[0] + A[1] * A[1];
+    const b2 = B[0] * B[0] + B[1] * B[1];
+    const c2 = C[0] * C[0] + C[1] * C[1];
+    const ux = (a2 * (B[1] - C[1]) + b2 * (C[1] - A[1]) + c2 * (A[1] - B[1])) / d;
+    const uy = (a2 * (C[0] - B[0]) + b2 * (A[0] - C[0]) + c2 * (B[0] - A[0])) / d;
+    return [ux, uy];
+}
+
+// intersection parameter t in [0,1] along p0->p1 where it crosses q0-q1, else -1
+function apSegT(p0 is array, p1 is array, q0 is array, q1 is array) returns number
+{
+    const r0 = p1[0] - p0[0]; const r1 = p1[1] - p0[1];
+    const s0 = q1[0] - q0[0]; const s1 = q1[1] - q0[1];
+    const den = r0 * s1 - r1 * s0;
+    if (abs(den) < 1e-12) return -1;
+    const qpx = q0[0] - p0[0]; const qpy = q0[1] - p0[1];
+    const t = (qpx * s1 - qpy * s0) / den;
+    const u = (qpx * r1 - qpy * r0) / den;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return t;
+    return -1;
+}
+
+function apSegCircleT(p0 is array, p1 is array, c is array, rr) returns array
+{
+    var res = [];
+    const dx = p1[0] - p0[0]; const dy = p1[1] - p0[1];
+    const a = dx * dx + dy * dy;
+    if (a < 1e-12) return res;
+    const fx = p0[0] - c[0]; const fy = p0[1] - c[1];
+    const b = 2 * (fx * dx + fy * dy);
+    const cc = fx * fx + fy * fy - rr * rr;
+    var disc = b * b - 4 * a * cc;
+    if (disc < 0) return res;
+    disc = sqrt(disc);
+    const t1 = (-b - disc) / (2 * a); const t2 = (-b + disc) / (2 * a);
+    if (t1 > 0 && t1 < 1) res = append(res, t1);
+    if (t2 > 0 && t2 < 1) res = append(res, t2);
+    return res;
+}
+
+function apSortNums(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1) if (a[j] < a[mi]) mi = j;
         if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
     }
     return a;
