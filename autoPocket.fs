@@ -200,6 +200,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 bMinX = min(bMinX, pp[0]); bMaxX = max(bMaxX, pp[0]);
                 bMinY = min(bMinY, pp[1]); bMaxY = max(bMaxY, pp[1]);
             }
+            const holeMarginMm = definition.holeMargin / millimeter;
             const jit = 0.32;
             const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
 
@@ -283,6 +284,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                         if (t >= 0) ts = append(ts, t);
                     }
                 }
+                for (var hi = 0; hi < size(holes); hi += 1)
+                {
+                    const cts = apSegCircleT(w0, w1, holes[hi], hRad[hi] + holeMarginMm);
+                    for (var ci = 0; ci < size(cts); ci += 1) ts = append(ts, cts[ci]);
+                }
                 ts = apSortNums(ts);
                 for (var m = 0; m < size(ts) - 1; m += 1)
                 {
@@ -290,7 +296,11 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     if (tb - ta < 1e-4) continue;
                     const tm = (ta + tb) / 2;
                     const pm = [w0[0] + (w1[0] - w0[0]) * tm, w0[1] + (w1[1] - w0[1]) * tm];
-                    if (inMaterial(poly, inners, pm))
+                    var ok = inMaterial(poly, inners, pm);
+                    if (ok)
+                        for (var hi = 0; hi < size(holes); hi += 1)
+                            if (pointDistance(pm, holes[hi]) < hRad[hi] + holeMarginMm) { ok = false; break; }
+                    if (ok)
                     {
                         const pa = [w0[0] + (w1[0] - w0[0]) * ta, w0[1] + (w1[1] - w0[1]) * ta];
                         const pb = [w0[0] + (w1[0] - w0[0]) * tb, w0[1] + (w1[1] - w0[1]) * tb];
@@ -299,8 +309,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 }
             }
 
-            // one connected network (Part Lightening needs a single part)
-            ribs = apConnectSegs(ribs);
+            // one connected SOLID (Part Lightening needs a single part): bridge
+            // any rib islands left isolated by hole cuts, routing in material.
+            ribs = apConnectSegs(ribs, poly, inners, holes, hRad);
 
             // support every hole: if no rib already runs through it, add a short
             // strut to the nearest wall (the part inside the hole is cut away).
@@ -314,7 +325,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                     const dd = pointDistance(hc, pt);
                     if (dd < best) { best = dd; bp = pt; found = true; }
                 }
-                if (found && best > hRad[hh] + 0.5) ribs = append(ribs, [hc, bp]);
+                if (found && best > hRad[hh] + holeMarginMm + 1.0) ribs = append(ribs, [hc, bp]);
             }
 
             const vSketch = newSketchOnPlane(context, id + "ribs", { "sketchPlane" : plane });
@@ -853,8 +864,23 @@ function apClosestOnSeg(p is array, a is array, b is array) returns array
     return [a[0] + t * vx, a[1] + t * vy];
 }
 
-// merge disconnected wall islands into ONE network with shortest links
-function apConnectSegs(segs is array) returns array
+// true if the whole segment a-b stays in solid material (no hole, no void)
+function apSegInMaterial(a is array, b is array, poly is array, inners is array, holes is array, hRad is array) returns boolean
+{
+    for (var t = 1; t <= 9; t += 1)
+    {
+        const f = t / 10;
+        const p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+        if (!inMaterial(poly, inners, p)) return false;
+        for (var h = 0; h < size(holes); h += 1)
+            if (pointDistance(p, holes[h]) < hRad[h]) return false;
+    }
+    return true;
+}
+
+// merge disconnected wall islands into ONE solid network with shortest IN-MATERIAL
+// links (bridges route around holes/voids, so the lightened solid is one part)
+function apConnectSegs(segs is array, poly is array, inners is array, holes is array, hRad is array) returns array
 {
     var nodes = []; var key2 = {}; var pairs = [];
     for (var i = 0; i < size(segs); i += 1)
@@ -890,7 +916,8 @@ function apConnectSegs(segs is array) returns array
             {
                 if (ufFind(par, i) == ufFind(par, j)) continue;
                 const dd = pointDistance(nodes[i], nodes[j]);
-                if (dd < best) { best = dd; bi = i; bj = j; }
+                if (dd >= best) continue;
+                if (apSegInMaterial(nodes[i], nodes[j], poly, inners, holes, hRad)) { best = dd; bi = i; bj = j; }
             }
         if (bi < 0) break;
         out = append(out, [nodes[bi], nodes[bj]]);
