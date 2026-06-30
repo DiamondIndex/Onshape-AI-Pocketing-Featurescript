@@ -55,7 +55,7 @@ export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
 
 export const REFINE_BOUNDS = { (unitless) : [1.0, 1.5, 4.0] } as RealBoundSpec;
 
-export const CELLJIT_BOUNDS = { (unitless) : [0.22, 0.3, 0.6] } as RealBoundSpec;
+export const CELLJIT_BOUNDS = { (unitless) : [0.0, 0.3, 0.6] } as RealBoundSpec;
 
 // ----- feature --------------------------------------------------------------
 
@@ -112,6 +112,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Cell jitter (Voronoi)" }
         isReal(definition.cellJitter, CELLJIT_BOUNDS);
+
+        annotation { "Name" : "Hexagonal cells (more uniform)" }
+        definition.hexCells is boolean;
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -206,22 +209,36 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 bMinY = min(bMinY, pp[1]); bMaxY = max(bMaxY, pp[1]);
             }
             const holeMarginMm = definition.holeMargin / millimeter;
-            const jit = definition.cellJitter;
+            // square lattice needs jitter to break 4-valent junctions; hex is
+            // stable at 3-valent, so it tolerates low jitter (very uniform cells).
+            const jit = definition.hexCells ? definition.cellJitter : max(definition.cellJitter, 0.22);
             const gcx = (bMinX + bMaxX) / 2; const gcy = (bMinY + bMaxY) / 2;
 
-            // sites = square lattice ROTATED 45 deg (walls run ~45/135 deg, off
-            // horizontal/vertical) + hash jitter. Holes are NOT sites, so they
-            // land on cell walls (supported) instead of floating in cell centres.
+            // site lattice: rotated-square (walls ~45 deg, off horizontal/vertical)
+            // or hexagonal (uniform, stable junctions), rotated 15 deg to keep its
+            // edges off-axis. Holes are NOT sites, so they land on cell walls.
             var sites = [];
             const diag = sqrt((bMaxX - bMinX) * (bMaxX - bMinX) + (bMaxY - bMinY) * (bMaxY - bMinY));
-            const NN = ceil(diag / s) + 2;
+            const rowH = s * sqrt(3) / 2;
+            const ct = cos(15 * degree); const st = sin(15 * degree);
+            const NN = ceil(diag / rowH) + 3;
             var hidx = 0;
             for (var gi = -NN; gi <= NN; gi += 1)
                 for (var gj = -NN; gj <= NN; gj += 1)
                 {
                     hidx += 1;
-                    const lx = gi * s; const ly = gj * s;
-                    const rx = (lx - ly) * 0.7071068; const ry = (lx + ly) * 0.7071068;
+                    var rx = 0; var ry = 0;
+                    if (definition.hexCells)
+                    {
+                        const lx = gi * s + (((gj % 2) == 0) ? 0 : s / 2);
+                        const ly = gj * rowH;
+                        rx = lx * ct - ly * st; ry = lx * st + ly * ct;
+                    }
+                    else
+                    {
+                        const lx = gi * s; const ly = gj * s;
+                        rx = (lx - ly) * 0.7071068; ry = (lx + ly) * 0.7071068;
+                    }
                     const e1 = sin((hidx * 12.9898 + 7.13) * radian) * 43758.5453;
                     const e2 = sin(((hidx + 9173) * 12.9898 + 7.13) * radian) * 43758.5453;
                     const j1 = e1 - floor(e1); const j2 = e2 - floor(e2);
