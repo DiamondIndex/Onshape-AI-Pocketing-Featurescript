@@ -55,7 +55,7 @@ export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
 
 export const REFINE_BOUNDS = { (unitless) : [1.0, 1.5, 4.0] } as RealBoundSpec;
 
-export const CELLJIT_BOUNDS = { (unitless) : [0.0, 0.32, 0.6] } as RealBoundSpec;
+export const CELLJIT_BOUNDS = { (unitless) : [0.0, 0.18, 0.6] } as RealBoundSpec;
 
 // ----- feature --------------------------------------------------------------
 
