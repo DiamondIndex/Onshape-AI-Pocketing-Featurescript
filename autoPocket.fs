@@ -55,7 +55,7 @@ export const VERT_BOUNDS = { (degree) : [0.0, 15.0, 45.0],
 
 export const REFINE_BOUNDS = { (unitless) : [1.0, 1.5, 4.0] } as RealBoundSpec;
 
-export const CELLJIT_BOUNDS = { (unitless) : [0.0, 0.18, 0.6] } as RealBoundSpec;
+export const CELLJIT_BOUNDS = { (unitless) : [0.22, 0.3, 0.6] } as RealBoundSpec;
 
 // ----- feature --------------------------------------------------------------
 
@@ -234,7 +234,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                         for (var sp in sites) if (pointDistance(q, sp) < 0.7 * s) { clear = false; break; }
                         if (clear)
                             for (var hh = 0; hh < size(holes); hh += 1)
-                                if (pointDistance(q, holes[hh]) < hRad[hh] + 0.25 * s) { clear = false; break; }
+                                if (pointDistance(q, holes[hh]) < hRad[hh] + 0.35 * s) { clear = false; break; }
                         if (clear) sites = append(sites, q);
                     }
                 }
