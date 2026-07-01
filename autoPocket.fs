@@ -881,6 +881,26 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             ribs = append(ribs, cr);
         }
 
+        // ----- ring ribs around every hole vertex -------------------------
+        // Holes are rib junctions; cutting a hole would dissolve its junction and
+        // shatter the frame into many parts. A small rib ring at (hole radius +
+        // material margin) ties the surrounding ribs together so the cut leaves
+        // one connected part (and reinforces every hole, like the reference plates).
+        const holeRingMargin = definition.holeMargin / millimeter;
+        for (var i = 0; i < size(holes); i += 1)
+        {
+            const rr = hRad[i] + holeRingMargin;
+            var prev = [holes[i][0] + rr, holes[i][1]];
+            for (var k = 1; k <= 8; k += 1)
+            {
+                const ang = (k / 8 * 2 * PI) * radian;
+                const cur = [holes[i][0] + rr * cos(ang), holes[i][1] + rr * sin(ang)];
+                if (inMaterial(poly, inners, prev) || inMaterial(poly, inners, cur))
+                    ribs = append(ribs, [prev, cur]);
+                prev = cur;
+            }
+        }
+
         // ----- 7. draw the rib network as a SKETCH only (no solid cut) ----
         // Exactly the web-app ribs: kept Delaunay edges + cluster ribs, drawn as
         // centrelines, plus a reference circle (boss) around each hole.
