@@ -867,38 +867,63 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             }
         }
 
+        // Hole-vertex reinforcing rings. Every hole is a rib junction; cutting
+        // the hole would dissolve the junction and shatter the frame. So TRUNCATE
+        // each rib that reaches a single-hole vertex at (hole radius + margin) and
+        // connect those truncated ends with chords -> a ring the ribs terminate on
+        // that survives the hole cut, keeping the frame one part.
+        const holeRingMargin = definition.holeMargin / millimeter;
+        var holeRR = {};
+        for (var v = 0; v < nHoleV; v += 1)
+            for (var i = 0; i < size(holes); i += 1)
+                if (pointDistance(pts[v], holes[i]) < 0.5)
+                { holeRR[v ~ ""] = hRad[i] + holeRingMargin; break; }
+
+        var ringEnds = {};
         var ribs = [];
         for (var key in keys(edgeIdx))
         {
             const ed = edgeIdx[key];
-            ribs = append(ribs, [pts[ed[0]], pts[ed[1]]]);
+            const A = pts[ed[0]]; const B = pts[ed[1]];
+            const dxAB = B[0] - A[0]; const dyAB = B[1] - A[1];
+            const dl = sqrt(dxAB * dxAB + dyAB * dyAB);
+            var pa = A; var pb = B;
+            if (dl > 1e-6)
+            {
+                if (holeRR[ed[0] ~ ""] != undefined && dl > holeRR[ed[0] ~ ""] + 1e-6)
+                {
+                    const rr = holeRR[ed[0] ~ ""];
+                    pa = [A[0] + dxAB / dl * rr, A[1] + dyAB / dl * rr];
+                    const vk = ed[0] ~ "";
+                    if (ringEnds[vk] == undefined) ringEnds[vk] = [];
+                    ringEnds[vk] = append(ringEnds[vk], [atan2(dyAB, dxAB) / radian, pa]);
+                }
+                if (holeRR[ed[1] ~ ""] != undefined && dl > holeRR[ed[1] ~ ""] + 1e-6)
+                {
+                    const rr = holeRR[ed[1] ~ ""];
+                    pb = [B[0] - dxAB / dl * rr, B[1] - dyAB / dl * rr];
+                    const vk = ed[1] ~ "";
+                    if (ringEnds[vk] == undefined) ringEnds[vk] = [];
+                    ringEnds[vk] = append(ringEnds[vk], [atan2(-dyAB, -dxAB) / radian, pb]);
+                }
+            }
+            if (pointDistance(pa, pb) > 1e-6) ribs = append(ribs, [pa, pb]);
         }
+        // close each hole's ring with chords between consecutive truncated ends
+        for (var vk in keys(ringEnds))
+        {
+            var arr = sortByAng(ringEnds[vk]);
+            if (size(arr) < 2) continue;
+            for (var k = 0; k < size(arr); k += 1)
+                ribs = append(ribs, [arr[k][1], arr[(k + 1) % size(arr)][1]]);
+        }
+
         for (var cr in clusterRibs)
         {
             const dx = cr[1][0] - cr[0][0]; const dy = cr[1][1] - cr[0][1];
             const len = sqrt(dx * dx + dy * dy);
             if (sinVert > 0 && len > 1e-6 && abs(dx) / len < sinVert) continue;   // no vertical cluster ribs
             ribs = append(ribs, cr);
-        }
-
-        // ----- ring ribs around every hole vertex -------------------------
-        // Holes are rib junctions; cutting a hole would dissolve its junction and
-        // shatter the frame into many parts. A small rib ring at (hole radius +
-        // material margin) ties the surrounding ribs together so the cut leaves
-        // one connected part (and reinforces every hole, like the reference plates).
-        const holeRingMargin = definition.holeMargin / millimeter;
-        for (var i = 0; i < size(holes); i += 1)
-        {
-            const rr = hRad[i] + holeRingMargin;
-            var prev = [holes[i][0] + rr, holes[i][1]];
-            for (var k = 1; k <= 8; k += 1)
-            {
-                const ang = (k / 8 * 2 * PI) * radian;
-                const cur = [holes[i][0] + rr * cos(ang), holes[i][1] + rr * sin(ang)];
-                if (inMaterial(poly, inners, prev) || inMaterial(poly, inners, cur))
-                    ribs = append(ribs, [prev, cur]);
-                prev = cur;
-            }
         }
 
         // ----- 7. draw the rib network as a SKETCH only (no solid cut) ----
@@ -1141,6 +1166,19 @@ function apConnectSegs(segs is array, poly is array, inners is array, holes is a
         par[ufFind(par, bi)] = ufFind(par, bj);
     }
     return out;
+}
+
+function sortByAng(arr is array) returns array
+{
+    var a = arr;
+    for (var i = 0; i < size(a); i += 1)
+    {
+        var mi = i;
+        for (var j = i + 1; j < size(a); j += 1)
+            if (a[j][0] < a[mi][0]) mi = j;
+        if (mi != i) { const t = a[i]; a[i] = a[mi]; a[mi] = t; }
+    }
+    return a;
 }
 
 function apSortNums(arr is array) returns array
