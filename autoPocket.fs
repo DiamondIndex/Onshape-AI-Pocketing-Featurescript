@@ -455,6 +455,7 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         {
             nodePts = []; kept = []; clusterRibs = [];
         }
+        const nHoleV = size(nodePts);   // vertices [0..nHoleV-1] are holes
 
         // ----- 4. even-spacing lattice fill (optional) --------------------
         if (definition.evenSpacing || definition.equilateral)
@@ -684,8 +685,8 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
             edgeIdx = edge2;
         }
 
-        // ----- 6a2. drop (almost) vertical ribs ---------------------------
-        // No vertical / near-vertical lines in the pocketing.
+        // ----- 6a2. drop (almost) vertical OR horizontal ribs --------------
+        // Ribs should be angled, never axis-aligned.
         if (sinVert > 0 && !definition.onlyTriangles)
         {
             var edgeV = {};
@@ -695,11 +696,137 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 const dx = pts[e[1]][0] - pts[e[0]][0];
                 const dy = pts[e[1]][1] - pts[e[0]][1];
                 const len = sqrt(dx * dx + dy * dy);
-                if (len > 1e-6 && abs(dx) / len < sinVert)
-                { removed[key] = e; removedPri[key] = 1; continue; }   // pool near-vertical
+                if (len > 1e-6 && (abs(dx) / len < sinVert || abs(dy) / len < sinVert))
+                { removed[key] = e; removedPri[key] = 1; continue; }   // pool axis-aligned
                 edgeV[key] = e;
             }
             edgeIdx = edgeV;
+        }
+
+        // ----- 6a4. EDGE-RULE GRAPH (the "strength" selection) -------------
+        // Delaunay is only the candidate set; these rules pick the ribs:
+        //  (a) no obtuse triangles -- a triangle with an angle > ~100 deg loses
+        //      its longest edge (the one opposite the obtuse corner),
+        //  (b) no rib much shorter than the mean -- reroute (drop, the network
+        //      re-closes around it) instead of leaving micro pockets,
+        //  (c) each hole keeps ~3 ribs spread ~120 deg apart; extra ribs at a
+        //      hole are dead weight and get pooled.
+        if (!definition.onlyTriangles)
+        {
+            // (a) obtuse-triangle fix
+            var edgeO = {};
+            for (var tri in triangles)
+            {
+                const ks = [min(tri[0], tri[1]) ~ "_" ~ max(tri[0], tri[1]),
+                            min(tri[1], tri[2]) ~ "_" ~ max(tri[1], tri[2]),
+                            min(tri[2], tri[0]) ~ "_" ~ max(tri[2], tri[0])];
+                if (edgeIdx[ks[0]] == undefined || edgeIdx[ks[1]] == undefined
+                        || edgeIdx[ks[2]] == undefined) continue;
+                const la = pointDistance(pts[tri[1]], pts[tri[2]]);
+                const lb = pointDistance(pts[tri[2]], pts[tri[0]]);
+                const lc = pointDistance(pts[tri[0]], pts[tri[1]]);
+                const mx = max(max(la, lb), lc);
+                const s1 = (mx == la) ? lb : la;
+                const s2 = (mx == lc) ? lb : lc;
+                // obtuse iff longest^2 > sum of squares of the others (90 deg) with margin
+                if (mx * mx > 1.12 * (s1 * s1 + s2 * s2))
+                {
+                    var longKey = ks[0];
+                    if (mx == la) longKey = ks[1];
+                    if (mx == lb) longKey = ks[2];
+                    edgeO[longKey] = true;
+                }
+            }
+            var edgeA = {};
+            for (var key in keys(edgeIdx))
+            {
+                if (edgeO[key] != undefined)
+                { removed[key] = edgeIdx[key]; removedPri[key] = 1; continue; }
+                edgeA[key] = edgeIdx[key];
+            }
+            edgeIdx = edgeA;
+
+            // (b) short-rib removal (vs mean length)
+            var totLen = 0; var nE = 0;
+            for (var key in keys(edgeIdx))
+            { totLen += pointDistance(pts[edgeIdx[key][0]], pts[edgeIdx[key][1]]); nE += 1; }
+            if (nE > 0)
+            {
+                const meanLen = totLen / nE;
+                var edgeS = {};
+                for (var key in keys(edgeIdx))
+                {
+                    const e = edgeIdx[key];
+                    if (pointDistance(pts[e[0]], pts[e[1]]) < 0.5 * meanLen)
+                    { removed[key] = e; removedPri[key] = 2; continue; }
+                    edgeS[key] = e;
+                }
+                edgeIdx = edgeS;
+            }
+
+            // (c) 3 ribs per hole, spread ~120 deg (greedy max-min-angle pick)
+            var incH = {};
+            for (var key in keys(edgeIdx))
+            {
+                const e = edgeIdx[key];
+                for (var w = 0; w < 2; w += 1)
+                {
+                    const vk = e[w] ~ "";
+                    if (incH[vk] == undefined) incH[vk] = [];
+                    incH[vk] = append(incH[vk], key);
+                }
+            }
+            var dropH = {};
+            for (var h = 0; h < nHoleV; h += 1)
+            {
+                const hk = h ~ "";
+                if (incH[hk] == undefined || size(incH[hk]) <= 3) continue;
+                var cand = [];
+                for (var ki = 0; ki < size(incH[hk]); ki += 1)
+                {
+                    const key = incH[hk][ki];
+                    if (edgeIdx[key] == undefined || dropH[key] != undefined) continue;
+                    const e = edgeIdx[key];
+                    const o = (e[0] == h) ? e[1] : e[0];
+                    cand = append(cand, [key, atan2(pts[o][1] - pts[h][1], pts[o][0] - pts[h][0]) / radian]);
+                }
+                if (size(cand) <= 3) continue;
+                var keptA = [cand[0][1]];
+                var keptK = { (cand[0][0]) : true };
+                while (size(keptA) < 3)
+                {
+                    var bi = -1; var bScore = -1.0;
+                    for (var ci = 0; ci < size(cand); ci += 1)
+                    {
+                        if (keptK[cand[ci][0]] != undefined) continue;
+                        var mn = 1e9;
+                        for (var ai = 0; ai < size(keptA); ai += 1)
+                        {
+                            var d = abs(cand[ci][1] - keptA[ai]);
+                            while (d > PI) d = abs(d - 2 * PI);
+                            if (d < mn) mn = d;
+                        }
+                        if (mn > bScore) { bScore = mn; bi = ci; }
+                    }
+                    if (bi < 0) break;
+                    keptA = append(keptA, cand[bi][1]);
+                    keptK[cand[bi][0]] = true;
+                }
+                for (var ci = 0; ci < size(cand); ci += 1)
+                {
+                    const key = cand[ci][0];
+                    if (keptK[key] != undefined) continue;
+                    dropH[key] = true;
+                }
+            }
+            var edgeH = {};
+            for (var key in keys(edgeIdx))
+            {
+                if (dropH[key] != undefined)
+                { removed[key] = edgeIdx[key]; removedPri[key] = 2; continue; }
+                edgeH[key] = edgeIdx[key];
+            }
+            edgeIdx = edgeH;
         }
 
         // ----- 6b. reconnect into ONE part with real edges only -----------
