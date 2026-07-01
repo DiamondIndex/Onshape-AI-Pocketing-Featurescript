@@ -115,6 +115,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
 
         annotation { "Name" : "Hexagonal cells (more uniform)" }
         definition.hexCells is boolean;
+
+        annotation { "Name" : "Strength edge-rules (experimental)" }
+        definition.edgeRules is boolean;
     }
     {
         if (size(evaluateQuery(context, definition.face)) != 1)
@@ -711,7 +714,9 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
         //      re-closes around it) instead of leaving micro pockets,
         //  (c) each hole keeps ~3 ribs spread ~120 deg apart; extra ribs at a
         //      hole are dead weight and get pooled.
-        if (!definition.onlyTriangles)
+        // NOTE: opt-in -- the remove-then-reconnect interaction still needs a
+        // redesign, so off by default it uses the proven Delaunay + reconnect.
+        if (definition.edgeRules && !definition.onlyTriangles)
         {
             // (a) obtuse-triangle fix
             var edgeO = {};
