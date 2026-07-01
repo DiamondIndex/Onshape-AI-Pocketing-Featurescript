@@ -827,6 +827,42 @@ export const autoPocket = defineFeature(function(context is Context, id is Id, d
                 edgeH[key] = edgeIdx[key];
             }
             edgeIdx = edgeH;
+
+            // (d) dead-end pruning: a rib whose non-hole endpoint connects to
+            // nothing else carries no load -- pure weight. Iterate until stable.
+            var dpass = 0;
+            while (dpass < 12)
+            {
+                dpass += 1;
+                var deg = {};
+                for (var key in keys(edgeIdx))
+                {
+                    const e = edgeIdx[key];
+                    for (var w = 0; w < 2; w += 1)
+                    {
+                        const vk = e[w] ~ "";
+                        deg[vk] = (deg[vk] == undefined) ? 1 : deg[vk] + 1;
+                    }
+                }
+                var changed = false;
+                var edgeD = {};
+                for (var key in keys(edgeIdx))
+                {
+                    const e = edgeIdx[key];
+                    var dead = false;
+                    for (var w = 0; w < 2; w += 1)
+                    {
+                        const isHole = e[w] < nHoleV;
+                        const isRim = e[w] >= rimStart && e[w] < rimEnd;   // anchored to wall
+                        if (!isHole && !isRim && deg[e[w] ~ ""] == 1) dead = true;
+                    }
+                    if (dead)
+                    { removed[key] = e; removedPri[key] = 3; changed = true; continue; }
+                    edgeD[key] = e;
+                }
+                edgeIdx = edgeD;
+                if (!changed) break;
+            }
         }
 
         // ----- 6b. reconnect into ONE part with real edges only -----------
